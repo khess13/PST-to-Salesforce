@@ -326,14 +326,18 @@ class PSTExtractor:
             return
 
         self.emails.append({
-            "Id":          email_id,
-            "Subject":     subject,
-            "SenderName":  sender,
-            "SenderEmail": sender_email,
-            "SentDate":    sent_dt,
-            "BodyPlain":   body_plain,
-            "BodyHtml":    body_html,
-            "FolderPath":  folder_path,
+            "Id":              email_id,
+            "Subject":         subject,
+            "SenderName":      sender,
+            "SenderEmail":     sender_email,
+            "SentDate":        sent_dt,
+            "BodyPlain":       body_plain,
+            "BodyHtml":        body_html,
+            "ToAddress":       "",   # populated in main() from recipients
+            "CcAddress":       "",
+            "BccAddress":      "",
+            "IsClientManaged": True,
+            "FolderPath":      folder_path,
         })
 
         # ---- Recipients -------------------------------------------------
@@ -819,7 +823,7 @@ def main():
         email["ToAddress"]  = addrs.get("ToAddress", "")
         email["CcAddress"]  = addrs.get("CcAddress", "")
         email["BccAddress"] = addrs.get("BccAddress", "")
-        email["IsClientManaged"] = True   # avoids Status lock & CreatedBy restriction
+        # IsClientManaged already set to True in _process_message
 
     # ---- 1. emails.csv  →  EmailMessage (Insert) ------------------------
     # BodyHtml included/excluded BEFORE list() so columns and rename stay in sync
