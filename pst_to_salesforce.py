@@ -97,11 +97,33 @@ def _safe_dt(dt_obj) -> str:
         return ""
 
 
+# Matches RTF headers that pypff sometimes returns in plain_text_body
+_RTF_HEADER_RE  = re.compile(r'^\s*\{\\rtf', re.IGNORECASE)
+# Matches XML/HTML-like attribute noise: Locked="false" Priority="49" etc.
+_XML_ATTR_RE    = re.compile(r'\b\w+\s*=\s*"[^"]{0,200}"')
+
+
 def _clean_body(text: str) -> str:
-    """Strip excessive whitespace from email body text."""
+    """
+    Sanitise email body text for safe CSV output.
+    - Removes null bytes and non-printable control characters (except tab/LF/CR)
+    - Detects and rejects RTF payloads that pypff returns instead of plain text
+    - Collapses excessive blank lines
+    """
     if not text:
         return ""
-    # Collapse runs of blank lines to a single blank line
+
+    # Null bytes and non-printable control chars break CSV parsers
+    text = text.replace("\x00", "")
+    text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+
+    # pypff occasionally returns RTF markup in plain_text_body when no plain
+    # text part exists — these look like:  {\rtf1\ansi ... Locked="false" ...}
+    # Returning this as TextBody would pollute every downstream field.
+    if _RTF_HEADER_RE.match(text):
+        return ""   # caller should fall back to html_body or leave blank
+
+    # Collapse runs of blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -243,6 +265,8 @@ class PSTExtractor:
         sender       = _safe_str(message.sender_name)
         sender_email = _parse_sender_email(message)
         body_plain   = _clean_body(_safe_str(message.plain_text_body))
+        # If plain body was RTF markup, _clean_body returns ""; fall back to
+        # a blank string — HtmlBody will carry the content instead.
         body_html    = _clean_body(_safe_str(message.html_body))
         sent_dt      = _safe_dt(message.delivery_time)
         msg_id       = _safe_str(getattr(message, "message_identifier", ""))
@@ -600,6 +624,8 @@ def main():
         email["IsClientManaged"] = True   # avoids Status lock & CreatedBy restriction
 
     # ---- 1. emails.csv  →  EmailMessage (Insert) ------------------------
+    # Build column map — BodyHtml included BEFORE list() is called so
+    # the columns arg and rename dict are always in sync.
     email_col_map = {
         "Id":              "ExternalId__c",
         "Subject":         "Subject",
@@ -607,16 +633,19 @@ def main():
         "SenderEmail":     "FromAddress",
         "SentDate":        "MessageDate",
         "BodyPlain":       "TextBody",
+        "BodyHtml":        "HtmlBody",     # filtered out below if --no-body-html
         "ToAddress":       "ToAddress",
         "CcAddress":       "CcAddress",
         "BccAddress":      "BccAddress",
         "IsClientManaged": "IsClientManaged",
         "FolderPath":      "Description",
     }
-    if not args.no_body_html:
-        email_col_map["BodyHtml"] = "HtmlBody"
+    if args.no_body_html:
+        del email_col_map["BodyHtml"]
 
-    write_csv(extractor.emails, list(email_col_map.keys()),
+    # columns and rename are derived from the same dict — always in sync
+    email_src_cols = list(email_col_map.keys())
+    write_csv(extractor.emails, email_src_cols,
               out_dir / "1_emails.csv", rename=email_col_map)
 
     # ---- 2. email_relations.csv  →  EmailMessageRelation (Insert) -------
