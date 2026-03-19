@@ -116,6 +116,36 @@ def _sanitise_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name) or "attachment"
 
 
+# Matches the address in  "Display Name <addr@example.com>"  or bare  addr@example.com
+_TRANSPORT_FROM_RE = re.compile(
+    r'^From:\s*(?:.*?<([^>]+)>|(\S+@\S+))', re.IGNORECASE | re.MULTILINE
+)
+
+
+def _parse_sender_email(message) -> str:
+    """
+    Extract the sender's email address from transport_headers.
+    pypff does not expose sender_email_address directly; the From header
+    inside transport_headers is the reliable source.
+
+    Falls back to an empty string if headers are absent or unparseable.
+    """
+    try:
+        headers = _safe_str(message.transport_headers)
+    except Exception:
+        return ""
+
+    if not headers:
+        return ""
+
+    m = _TRANSPORT_FROM_RE.search(headers)
+    if m:
+        # Group 1 = address inside angle-brackets, group 2 = bare address
+        return (m.group(1) or m.group(2) or "").strip().lower()
+
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Core extraction
 # ---------------------------------------------------------------------------
@@ -189,7 +219,7 @@ class PSTExtractor:
         # ---- Core fields ------------------------------------------------
         subject      = _safe_str(message.subject)
         sender       = _safe_str(message.sender_name)
-        sender_email = _safe_str(message.sender_email_address)
+        sender_email = _parse_sender_email(message)
         body_plain   = _clean_body(_safe_str(message.plain_text_body))
         body_html    = _clean_body(_safe_str(message.html_body))
         sent_dt      = _safe_dt(message.delivery_time)
