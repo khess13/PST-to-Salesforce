@@ -549,6 +549,20 @@ def write_csv(rows: list[dict], columns: list[str], out_path: Path, rename: dict
 
     for col in df.select_dtypes(include="bool").columns:
         df[col] = df[col].map({True: "TRUE", False: "FALSE"})
+
+    # Collapse embedded newlines so every record occupies exactly one CSV line.
+    # RFC 4180 allows quoted multiline fields, but most viewers (Excel, Numbers)
+    # treat any bare newline as a row boundary, which shifts all subsequent
+    # columns and inflates the apparent row count.
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = (
+            df[col]
+            .fillna("")
+            .str.replace("\r\n", "\\n", regex=False)
+            .str.replace("\r",   "\\n", regex=False)
+            .str.replace("\n",   "\\n", regex=False)
+        )
+
     df.to_csv(out_path, index=False, quoting=csv.QUOTE_ALL)
     log.info("  ✔ Written %d rows → %s", len(df), out_path)
 
