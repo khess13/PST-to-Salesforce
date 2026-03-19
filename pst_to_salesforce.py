@@ -108,17 +108,25 @@ def _safe_dt(dt_obj) -> str:
         return ""
 
 
-# Matches RTF headers that pypff sometimes returns in plain_text_body
-_RTF_HEADER_RE  = re.compile(r'^\s*\{\\rtf', re.IGNORECASE)
-# Matches XML/HTML-like attribute noise: Locked="false" Priority="49" etc.
-_XML_ATTR_RE    = re.compile(r'\b\w+\s*=\s*"[^"]{0,200}"')
+_RTF_HEADER_RE = re.compile(r'^\s*\{\\rtf', re.IGNORECASE)
+# Strips RTF control words like \pard\plain\f0 and braces
+_RTF_CONTROL_RE = re.compile(r'\{[^{}]*\}|\\[a-z]+\d*\s?|[{}]')
+
+
+def _strip_rtf(text: str) -> str:
+    """Best-effort plain text extraction from an RTF string."""
+    # Remove RTF control words and groups, collapse whitespace
+    plain = _RTF_CONTROL_RE.sub(' ', text)
+    plain = re.sub(r'[ \t]+', ' ', plain)
+    plain = re.sub(r'\n{3,}', '\n\n', plain)
+    return plain.strip()
 
 
 def _clean_body(text: str) -> str:
     """
     Sanitise email body text for safe CSV output.
-    - Removes null bytes and non-printable control characters (except tab/LF/CR)
-    - Detects and rejects RTF payloads that pypff returns instead of plain text
+    - Removes null bytes and non-printable control characters
+    - Strips RTF markup to plain text instead of discarding it
     - Collapses excessive blank lines
     """
     if not text:
@@ -128,13 +136,10 @@ def _clean_body(text: str) -> str:
     text = text.replace("\x00", "")
     text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
 
-    # pypff occasionally returns RTF markup in plain_text_body when no plain
-    # text part exists — these look like:  {\rtf1\ansi ... Locked="false" ...}
-    # Returning this as TextBody would pollute every downstream field.
+    # RTF payload — strip markup to recover readable plain text
     if _RTF_HEADER_RE.match(text):
-        return ""   # caller should fall back to html_body or leave blank
+        text = _strip_rtf(text)
 
-    # Collapse runs of blank lines
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
@@ -202,6 +207,36 @@ def _parse_sender_email(message) -> str:
         return (m.group(1) or m.group(2) or "").strip().lower()
 
     return ""
+
+
+# Parses a named header field (To, Cc, Bcc) from raw transport headers
+# Handles folded headers (continuation lines starting with whitespace)
+_HEADER_FIELD_RE = re.compile(
+    r'^({field}):\s*(.+?)(?=\n\S|\Z)', re.IGNORECASE | re.MULTILINE | re.DOTALL
+)
+
+
+def _parse_header_addresses(headers: str, field: str) -> str:
+    """Extract a semicolon-delimited address list from a named header field."""
+    pattern = re.compile(
+        rf'^{re.escape(field)}:\s*(.+?)(?=\n[^\t ]|\Z)',
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(headers)
+    if not m:
+        return ""
+    # Unfold continuation lines, split on commas, extract bare addresses
+    raw = re.sub(r'\r?\n[\t ]', ' ', m.group(1)).strip()
+    addrs = []
+    for part in raw.split(','):
+        part = part.strip()
+        # "Display Name <addr@example.com>" -> addr@example.com
+        angle = re.search(r'<([^>]+)>', part)
+        if angle:
+            addrs.append(angle.group(1).strip().lower())
+        elif '@' in part:
+            addrs.append(part.lower())
+    return ';'.join(addrs)
 
 
 # ---------------------------------------------------------------------------
@@ -298,7 +333,6 @@ class PSTExtractor:
         sender_email = _parse_sender_email(message)
 
         # Body getters return bytes — _safe_str decodes them.
-        # plain_text_body may be RTF; _clean_body returns "" in that case.
         body_plain = _clean_body(_get(message.get_plain_text_body))
         try:
             body_html = _clean_body(_get(message.get_html_body))
@@ -310,6 +344,17 @@ class PSTExtractor:
             _get_dt(message.get_client_submit_time)
             or _get_dt(message.get_delivery_time)
         )
+
+        # Pre-parse To/Cc/Bcc from transport_headers as a reliable fallback.
+        # get_email_address() on recipient sub-items often returns empty for
+        # Exchange/X.400 addresses — the headers always have SMTP addresses.
+        try:
+            _hdrs = _safe_str(message.get_transport_headers())
+        except Exception:
+            _hdrs = ""
+        _to_hdr  = _parse_header_addresses(_hdrs, "To")  if _hdrs else ""
+        _cc_hdr  = _parse_header_addresses(_hdrs, "Cc")  if _hdrs else ""
+        _bcc_hdr = _parse_header_addresses(_hdrs, "Bcc") if _hdrs else 
         try:
             num_attach = message.get_number_of_attachments() or 0
         except Exception:
@@ -333,9 +378,11 @@ class PSTExtractor:
             "SentDate":        sent_dt,
             "BodyPlain":       body_plain,
             "BodyHtml":        body_html,
-            "ToAddress":       "",   # populated in main() from recipients
-            "CcAddress":       "",
-            "BccAddress":      "",
+            # Seeded from transport_headers; overwritten in main() if
+            # recipient sub-items yield better SMTP addresses.
+            "ToAddress":       _to_hdr,
+            "CcAddress":       _cc_hdr,
+            "BccAddress":      _bcc_hdr,
             "IsClientManaged": True,
             "FolderPath":      folder_path,
         })
@@ -820,9 +867,14 @@ def main():
     addr_by_email = build_address_columns(extractor.recipients)
     for email in extractor.emails:
         addrs = addr_by_email.get(email["Id"], {})
-        email["ToAddress"]  = addrs.get("ToAddress", "")
-        email["CcAddress"]  = addrs.get("CcAddress", "")
-        email["BccAddress"] = addrs.get("BccAddress", "")
+        # Only overwrite header-parsed addresses if recipient sub-items
+        # produced non-empty SMTP addresses (they're more structured).
+        if addrs.get("ToAddress"):
+            email["ToAddress"]  = addrs["ToAddress"]
+        if addrs.get("CcAddress"):
+            email["CcAddress"]  = addrs["CcAddress"]
+        if addrs.get("BccAddress"):
+            email["BccAddress"] = addrs["BccAddress"]
         # IsClientManaged already set to True in _process_message
 
     # ---- 1. emails.csv  →  EmailMessage (Insert) ------------------------
