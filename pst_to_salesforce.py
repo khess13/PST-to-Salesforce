@@ -391,11 +391,11 @@ class PSTExtractor:
                     dest_dir  = self.attachment_dir / short_id
                     dest_dir.mkdir(parents=True, exist_ok=True)
 
-                    # Calculate how many characters are left for the filename
-                    # on this specific machine (accounts for varying base-dir depth).
+                    # Calculate available filename length using the ABSOLUTE resolved
+                    # path — relative paths give wrong lengths on Windows.
                     MAX_PATH   = 259
-                    available  = MAX_PATH - len(str(dest_dir)) - 1  # -1 for separator
-                    available  = max(available, 20)                  # always allow minimum
+                    available  = MAX_PATH - len(str(dest_dir.resolve())) - 1
+                    available  = max(available, 20)
                     safe_name  = _sanitise_filename(filename, max_len=available)
 
                     dest_file  = dest_dir / safe_name
@@ -575,7 +575,7 @@ def main():
 
     attach_dir = None
     if args.save_attachments:
-        attach_dir = out_dir / "attachment_files"
+        attach_dir = (out_dir / "attachment_files").resolve()  # always absolute
         attach_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- Extract --------------------------------------------------------
