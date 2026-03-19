@@ -110,10 +110,27 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# Reserved filenames on Windows (case-insensitive, with or without extension)
+_WINDOWS_RESERVED = re.compile(
+    r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)', re.IGNORECASE
+)
+_MAX_PATH_COMPONENT = 200  # leave headroom for the directory prefix
+
+
 def _sanitise_filename(name: str) -> str:
-    """Remove path-traversal characters from an attachment filename."""
+    """Remove illegal path characters and handle OS reserved names."""
     name = os.path.basename(name)
-    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name) or "attachment"
+    # Strip null bytes and common illegal characters
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
+    # Truncate individual component to stay within MAX_PATH headroom
+    if len(name) > _MAX_PATH_COMPONENT:
+        stem, _, ext = name.rpartition(".")
+        ext = ext[:10]  # cap extension too
+        name = stem[:_MAX_PATH_COMPONENT - len(ext) - 1] + "." + ext
+    # Replace Windows reserved names
+    if _WINDOWS_RESERVED.match(name):
+        name = f"_{name}"
+    return name or "attachment"
 
 
 # Matches the address in  "Display Name <addr@example.com>"  or bare  addr@example.com
@@ -297,7 +314,8 @@ class PSTExtractor:
                     sha256 = _sha256(data)
                 except Exception:
                     pass
-
+                
+                '''
                 if self.save_attachments and data and self.attachment_dir:
                     # Save as  <attachment_dir>/<email_id>/<filename>
                     dest_dir = self.attachment_dir / email_id
@@ -308,22 +326,70 @@ class PSTExtractor:
                         dest_file = dest_dir / f"{attach_id}_{filename}"
                     dest_file.write_bytes(data)
                     saved_path = str(dest_file)
+                '''
+                if self.save_attachments and data and self.attachment_dir:
+                dest_dir = self.attachment_dir / email_id
+                
+                # Verify the directory was actually created
+                try:
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+                    if not dest_dir.exists():
+                        raise OSError(f"Directory was not created: {dest_dir}")
+                except OSError as mkdir_exc:
+                    log.warning(
+                        "Could not create attachment directory '%s': %s — skipping save",
+                        dest_dir, mkdir_exc
+                    )
+                    # Still record metadata, just without a saved path
+                else:
+                    # Check total path length before attempting write (Windows MAX_PATH)
+                    dest_file = dest_dir / filename
+                    if len(str(dest_file)) > 259:
+                        dest_file = dest_dir / f"{attach_id}.bin"
+                        log.warning(
+                            "Path too long for '%s' — saving as '%s'",
+                            filename, dest_file.name
+                        )
 
-                mime_type = _safe_str(getattr(attach, "mime_type", ""))
-                content_id = _safe_str(getattr(attach, "content_identifier", ""))
+                    if dest_file.exists():
+                        dest_file = dest_dir / f"{attach_id}_{filename}"
+                        # Re-check length after prepending uuid
+                        if len(str(dest_file)) > 259:
+                            dest_file = dest_dir / f"{attach_id}.bin"
 
-                self.attachments.append({
-                    "Id":            attach_id,
-                    "EmailId":       email_id,      # FK → emails.Id
-                    "FileName":      filename,
-                    "MimeType":      mime_type,
-                    "SizeBytes":     size_bytes,
-                    "SHA256":        sha256,
-                    "ContentId":     content_id,
-                    "SavedFilePath": saved_path,
-                })
-            except Exception as exc:
-                log.warning("Could not extract attachment %d on email %s: %s", i, email_id, exc)
+                    try:
+                        dest_file.write_bytes(data)
+                        saved_path = str(dest_file)
+                    except OSError as write_exc:
+                        log.warning(
+                            "Could not write attachment '%s' (path len=%d): %s — "
+                            "retrying with uuid-only name",
+                            dest_file, len(str(dest_file)), write_exc
+                        )
+                        try:
+                            fallback = dest_dir / f"{attach_id}.bin"
+                            fallback.write_bytes(data)
+                            saved_path = str(fallback)
+                        except OSError as fallback_exc:
+                            log.error(
+                                "Could not save attachment '%s' even with fallback name: %s",
+                                attach_id, fallback_exc
+                            )
+                            mime_type = _safe_str(getattr(attach, "mime_type", ""))
+                            content_id = _safe_str(getattr(attach, "content_identifier", ""))
+
+                            self.attachments.append({
+                                "Id":            attach_id,
+                                "EmailId":       email_id,      # FK → emails.Id
+                                "FileName":      filename,
+                                "MimeType":      mime_type,
+                                "SizeBytes":     size_bytes,
+                                "SHA256":        sha256,
+                                "ContentId":     content_id,
+                                "SavedFilePath": saved_path,
+                            })
+                        except Exception as exc:
+                            log.warning("Could not extract attachment %d on email %s: %s", i, email_id, exc)
 
 
 # ---------------------------------------------------------------------------
