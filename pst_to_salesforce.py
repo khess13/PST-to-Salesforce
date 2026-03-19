@@ -354,7 +354,7 @@ class PSTExtractor:
             _hdrs = ""
         _to_hdr  = _parse_header_addresses(_hdrs, "To")  if _hdrs else ""
         _cc_hdr  = _parse_header_addresses(_hdrs, "Cc")  if _hdrs else ""
-        _bcc_hdr = _parse_header_addresses(_hdrs, "Bcc") if _hdrs else 
+        _bcc_hdr = _parse_header_addresses(_hdrs, "Bcc") if _hdrs else ""
         try:
             num_attach = message.get_number_of_attachments() or 0
         except Exception:
