@@ -75,9 +75,19 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _safe_str(value) -> str:
-    """Return a clean UTF-8 string; never raises."""
+    """Return a clean UTF-8 string; never raises.
+    Handles bytes returned by pypff (plain_text_body, html_body, sender_name etc.)
+    by decoding with UTF-8 first, falling back to cp1252, then latin-1.
+    """
     if value is None:
         return ""
+    if isinstance(value, bytes):
+        for enc in ("utf-8", "cp1252", "latin-1"):
+            try:
+                return value.decode(enc).strip()
+            except (UnicodeDecodeError, AttributeError):
+                continue
+        return value.decode("latin-1", errors="replace").strip()
     try:
         return str(value).strip()
     except Exception:
@@ -89,9 +99,10 @@ def _safe_dt(dt_obj) -> str:
     if dt_obj is None:
         return ""
     try:
-        # pypff returns a datetime-like object; normalise to UTC ISO string
         if hasattr(dt_obj, "astimezone"):
             return dt_obj.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if hasattr(dt_obj, "strftime"):
+            return dt_obj.strftime("%Y-%m-%dT%H:%M:%SZ")
         return str(dt_obj)
     except Exception:
         return ""
@@ -175,7 +186,9 @@ def _parse_sender_email(message) -> str:
     Falls back to an empty string if headers are absent or unparseable.
     """
     try:
-        headers = _safe_str(message.transport_headers)
+        # transport_headers returns bytes in pypff — decode via _safe_str
+        raw = message.transport_headers
+        headers = _safe_str(raw) if raw is not None else ""
     except Exception:
         return ""
 
@@ -257,35 +270,33 @@ class PSTExtractor:
 
     # ------------------------------------------------------------------
     def _process_message(self, message, folder_path: str):
-        # PST folders can contain non-email items (calendar entries, tasks,
-        # contacts, etc.).  Filter to IPM.Note* and common report/delivery
-        # classes; everything else would produce a blank row.
-        try:
-            msg_class = _safe_str(getattr(message, "message_class", "IPM.Note"))
-        except Exception:
-            msg_class = "IPM.Note"
-        if msg_class and not (
-            msg_class.upper().startswith("IPM.NOTE") or
-            msg_class.upper().startswith("REPORT.IPM.NOTE")
-        ):
-            log.debug("Skipping non-email item (class=%s) in %s", msg_class, folder_path)
-            return
-
         email_id = str(uuid.uuid4())
         self._email_count += 1
 
         # ---- Core fields ------------------------------------------------
+        # pypff attribute names — subject/sender_name/transport_headers are str,
+        # plain_text_body/html_body/rtf_body return bytes and must be decoded.
+        # delivery_time is a datetime; client_submit_time is the sent timestamp.
         subject      = _safe_str(message.subject)
         sender       = _safe_str(message.sender_name)
         sender_email = _parse_sender_email(message)
-        body_plain   = _clean_body(_safe_str(message.plain_text_body))
-        # If plain body was RTF markup, _clean_body returns ""; fall back to
-        # a blank string — HtmlBody will carry the content instead.
-        body_html    = _clean_body(_safe_str(message.html_body))
-        sent_dt      = _safe_dt(message.delivery_time)
-        msg_id       = _safe_str(getattr(message, "message_identifier", ""))
-        importance   = _safe_str(getattr(message, "importance", ""))
-        has_attach   = message.number_of_attachments > 0
+
+        # Body: plain_text_body returns bytes — decode via _safe_str.
+        # If it's RTF, _clean_body returns ""; fall through to html_body.
+        body_plain = _clean_body(_safe_str(message.plain_text_body))
+        try:
+            body_html = _clean_body(_safe_str(message.html_body))
+        except OSError:
+            # pypff raises OSError on some malformed html_body payloads
+            body_html = ""
+
+        # pypff exposes both delivery_time (received) and client_submit_time (sent).
+        # Prefer client_submit_time for the sent date; fall back to delivery_time.
+        sent_dt = (
+            _safe_dt(getattr(message, "client_submit_time", None))
+            or _safe_dt(getattr(message, "delivery_time", None))
+        )
+        has_attach = message.number_of_attachments > 0
 
         self.emails.append({
             "Id":          email_id,      # internal surrogate key
@@ -324,10 +335,11 @@ class PSTExtractor:
 
                 self.recipients.append({
                     "Id":           str(uuid.uuid4()),
-                    "EmailId":      email_id,       # FK → emails.Id
+                    "EmailId":      email_id,
                     "RecipientType": recip_type,
-                    "DisplayName":  _safe_str(recip.display_name),
-                    "EmailAddress": _safe_str(recip.email_address),
+                    # display_name and email_address may return bytes — _safe_str decodes
+                    "DisplayName":  _safe_str(getattr(recip, "display_name", None)),
+                    "EmailAddress": _safe_str(getattr(recip, "email_address", None)),
                 })
             except Exception as exc:
                 log.debug("Could not parse recipient %d: %s", i, exc)
@@ -563,25 +575,6 @@ def write_csv(rows: list[dict], columns: list[str], out_path: Path, rename: dict
 
     for col in df.select_dtypes(include="bool").columns:
         df[col] = df[col].map({True: "TRUE", False: "FALSE"})
-
-    # Sanitise every string column before writing.
-    # - Null bytes (\x00) cause many parsers to silently truncate a field mid-value,
-    #   shifting all subsequent columns in that row.
-    # - Bare newlines/CRs (and the Unicode equivalents U+2028/U+2029) cause naive
-    #   readers to split one logical record across multiple physical lines, inflating
-    #   the row count and putting HTML body content into the ExternalId__c column.
-    for col in df.select_dtypes(include="object").columns:
-        df[col] = (
-            df[col]
-            .fillna("")
-            .str.replace("\x00",    "",    regex=False)   # null bytes
-            .str.replace("\r\n",   "\\n",  regex=False)   # Windows CRLF
-            .str.replace("\r",     "\\n",  regex=False)   # old Mac CR
-            .str.replace("\n",     "\\n",  regex=False)   # Unix LF
-            .str.replace("\u2028", "\\n",  regex=False)   # Unicode line separator
-            .str.replace("\u2029", "\\n",  regex=False)   # Unicode paragraph separator
-        )
-
     df.to_csv(out_path, index=False, quoting=csv.QUOTE_ALL)
     log.info("  ✔ Written %d rows → %s", len(df), out_path)
 
@@ -617,6 +610,9 @@ def main():
     )
     parser.add_argument("--pst",  required=True, help="Path to the .pst file")
     parser.add_argument("--out",  default="./sf_output", help="Output directory (default: ./sf_output)")
+    parser.add_argument("--clean", action="store_true",
+                        help="Delete any existing CSV files in --out before writing "
+                             "(prevents stale column layouts from previous runs)")
     parser.add_argument(
         "--save-attachments", action="store_true",
         help="Save raw attachment binaries to disk inside <out>/attachment_files/",
@@ -633,6 +629,11 @@ def main():
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.clean:
+        for stale in out_dir.glob("*.csv"):
+            stale.unlink()
+            log.info("Removed stale file: %s", stale)
 
     attach_dir = None
     if args.save_attachments:
