@@ -326,70 +326,72 @@ class PSTExtractor:
                         dest_file = dest_dir / f"{attach_id}_{filename}"
                     dest_file.write_bytes(data)
                     saved_path = str(dest_file)
-                '''
+                ''''
                 if self.save_attachments and data and self.attachment_dir:
-                dest_dir = self.attachment_dir / email_id
-                
-                # Verify the directory was actually created
-                try:
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    if not dest_dir.exists():
-                        raise OSError(f"Directory was not created: {dest_dir}")
-                except OSError as mkdir_exc:
-                    log.warning(
-                        "Could not create attachment directory '%s': %s — skipping save",
-                        dest_dir, mkdir_exc
-                    )
-                    # Still record metadata, just without a saved path
-                else:
-                    # Check total path length before attempting write (Windows MAX_PATH)
-                    dest_file = dest_dir / filename
-                    if len(str(dest_file)) > 259:
-                        dest_file = dest_dir / f"{attach_id}.bin"
+                    dest_dir = self.attachment_dir / email_id
+                    
+                    # Verify the directory was actually created
+                    try:
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        if not dest_dir.exists():
+                            raise OSError(f"Directory was not created: {dest_dir}")
+                    except OSError as mkdir_exc:
                         log.warning(
-                            "Path too long for '%s' — saving as '%s'",
-                            filename, dest_file.name
+                            "Could not create attachment directory '%s': %s — skipping save",
+                            dest_dir, mkdir_exc
                         )
-
-                    if dest_file.exists():
-                        dest_file = dest_dir / f"{attach_id}_{filename}"
-                        # Re-check length after prepending uuid
+                        # Still record metadata, just without a saved path
+                    else:
+                        # Check total path length before attempting write (Windows MAX_PATH)
+                        dest_file = dest_dir / filename
                         if len(str(dest_file)) > 259:
                             dest_file = dest_dir / f"{attach_id}.bin"
-
-                    try:
-                        dest_file.write_bytes(data)
-                        saved_path = str(dest_file)
-                    except OSError as write_exc:
-                        log.warning(
-                            "Could not write attachment '%s' (path len=%d): %s — "
-                            "retrying with uuid-only name",
-                            dest_file, len(str(dest_file)), write_exc
-                        )
-                        try:
-                            fallback = dest_dir / f"{attach_id}.bin"
-                            fallback.write_bytes(data)
-                            saved_path = str(fallback)
-                        except OSError as fallback_exc:
-                            log.error(
-                                "Could not save attachment '%s' even with fallback name: %s",
-                                attach_id, fallback_exc
+                            log.warning(
+                                "Path too long for '%s' — saving as '%s'",
+                                filename, dest_file.name
                             )
-                            mime_type = _safe_str(getattr(attach, "mime_type", ""))
-                            content_id = _safe_str(getattr(attach, "content_identifier", ""))
 
-                            self.attachments.append({
-                                "Id":            attach_id,
-                                "EmailId":       email_id,      # FK → emails.Id
-                                "FileName":      filename,
-                                "MimeType":      mime_type,
-                                "SizeBytes":     size_bytes,
-                                "SHA256":        sha256,
-                                "ContentId":     content_id,
-                                "SavedFilePath": saved_path,
-                            })
-                        except Exception as exc:
-                            log.warning("Could not extract attachment %d on email %s: %s", i, email_id, exc)
+                        if dest_file.exists():
+                            dest_file = dest_dir / f"{attach_id}_{filename}"
+                            # Re-check length after prepending uuid
+                            if len(str(dest_file)) > 259:
+                                dest_file = dest_dir / f"{attach_id}.bin"
+
+                        try:
+                            dest_file.write_bytes(data)
+                            saved_path = str(dest_file)
+                        except OSError as write_exc:
+                            log.warning(
+                                "Could not write attachment '%s' (path len=%d): %s — "
+                                "retrying with uuid-only name",
+                                dest_file, len(str(dest_file)), write_exc
+                            )
+                            try:
+                                fallback = dest_dir / f"{attach_id}.bin"
+                                fallback.write_bytes(data)
+                                saved_path = str(fallback)
+                            except OSError as fallback_exc:
+                                log.error(
+                                    "Could not save attachment '%s' even with fallback name: %s",
+                                    attach_id, fallback_exc
+                                )
+                                
+                mime_type = _safe_str(getattr(attach, "mime_type", ""))
+                content_id = _safe_str(getattr(attach, "content_identifier", ""))
+
+
+                self.attachments.append({
+                    "Id":            attach_id,
+                    "EmailId":       email_id,      # FK → emails.Id
+                    "FileName":      filename,
+                    "MimeType":      mime_type,
+                    "SizeBytes":     size_bytes,
+                    "SHA256":        sha256,
+                    "ContentId":     content_id,
+                    "SavedFilePath": saved_path,
+                })
+            except Exception as exc:
+                log.warning("Could not extract attachment %d on email %s: %s", i, email_id, exc)
 
 
 # ---------------------------------------------------------------------------
