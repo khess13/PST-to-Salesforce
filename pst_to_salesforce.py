@@ -250,18 +250,14 @@ class PSTExtractor:
         has_attach   = message.number_of_attachments > 0
 
         self.emails.append({
-            "Id":                  email_id,          # internal surrogate key
-            "MessageId":           msg_id,
-            "Subject":             subject,
-            "SenderName":          sender,
-            "SenderEmail":         sender_email,
-            "SentDate":            sent_dt,
-            "BodyPlain":           body_plain,
-            "BodyHtml":            body_html,
-            "Importance":          importance,
-            "HasAttachments":      has_attach,
-            "AttachmentCount":     message.number_of_attachments,
-            "FolderPath":          folder_path,
+            "Id":          email_id,      # internal surrogate key
+            "Subject":     subject,
+            "SenderName":  sender,
+            "SenderEmail": sender_email,
+            "SentDate":    sent_dt,
+            "BodyPlain":   body_plain,
+            "BodyHtml":    body_html,
+            "FolderPath":  folder_path,
         })
 
         # ---- Recipients -------------------------------------------------
@@ -510,15 +506,23 @@ SF_CONTENT_DOC_LINK_FIELDS = {
 
 
 def write_csv(rows: list[dict], columns: list[str], out_path: Path, rename: dict = None):
-    """Write rows to CSV, optionally renaming columns."""
+    """Write rows to CSV, optionally renaming columns.
+
+    `columns` must be the SOURCE (pre-rename) key names.  Only those columns
+    are kept, in that order, before any rename is applied.  This prevents
+    orphan internal fields from bleeding into the output under a wrong header.
+    """
     df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=columns)
+
+    # 1. Select and ORDER by source columns — drops any internal keys not in
+    #    the explicit list (e.g. MessageId, Importance, HasAttachments).
+    src_cols = [c for c in columns if c in df.columns]
+    df = df[src_cols]
+
+    # 2. Rename to Salesforce API names AFTER the column set is locked.
     if rename:
-        df = df.rename(columns=rename)
-    # Keep only the columns we care about (drop internals)
-    out_cols = list(rename.values()) if rename else columns
-    out_cols = [c for c in out_cols if c in df.columns]
-    if out_cols:
-        df = df[out_cols]
+        df = df.rename(columns={k: v for k, v in rename.items() if k in src_cols})
+
     for col in df.select_dtypes(include="bool").columns:
         df[col] = df[col].map({True: "TRUE", False: "FALSE"})
     df.to_csv(out_path, index=False, quoting=csv.QUOTE_ALL)
