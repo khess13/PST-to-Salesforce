@@ -316,8 +316,17 @@ class PSTExtractor:
             num_attach = 0
         has_attach = num_attach > 0
 
+        # Skip non-email items (calendar, contacts, tasks, notes).
+        # Real emails always have at least one of: subject, sender, or body.
+        # Items missing all three are MAPI non-mail entries that landed in
+        # a message slot — processing them produces blank rows.
+        if not any([subject, sender, sender_email, body_plain, body_html, sent_dt]):
+            log.debug("Skipping non-email item in '%s' (no subject/sender/body/date)",
+                      folder_path)
+            return
+
         self.emails.append({
-            "Id":          email_id,      # internal surrogate key
+            "Id":          email_id,
             "Subject":     subject,
             "SenderName":  sender,
             "SenderEmail": sender_email,
@@ -615,18 +624,17 @@ SF_CONTENT_DOC_LINK_FIELDS = {
 def write_csv(rows: list[dict], columns: list[str], out_path: Path, rename: dict = None):
     """Write rows to CSV, optionally renaming columns.
 
-    `columns` must be the SOURCE (pre-rename) key names.  Only those columns
-    are kept, in that order, before any rename is applied.  This prevents
-    orphan internal fields from bleeding into the output under a wrong header.
+    columns must be the SOURCE key names in the desired output order.
+    Rows are filtered to only those keys before renaming, so no orphan
+    internal fields can bleed into the output.
     """
     df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=columns)
 
-    # 1. Select and ORDER by source columns — drops any internal keys not in
-    #    the explicit list (e.g. MessageId, Importance, HasAttachments).
+    # Select only the declared source columns in declared order
     src_cols = [c for c in columns if c in df.columns]
     df = df[src_cols]
 
-    # 2. Rename to Salesforce API names AFTER the column set is locked.
+    # Rename source keys to Salesforce API names
     if rename:
         df = df.rename(columns={k: v for k, v in rename.items() if k in src_cols})
 
@@ -814,8 +822,7 @@ def main():
         email["IsClientManaged"] = True   # avoids Status lock & CreatedBy restriction
 
     # ---- 1. emails.csv  →  EmailMessage (Insert) ------------------------
-    # Build column map — BodyHtml included BEFORE list() is called so
-    # the columns arg and rename dict are always in sync.
+    # BodyHtml included/excluded BEFORE list() so columns and rename stay in sync
     email_col_map = {
         "Id":              "ExternalId__c",
         "Subject":         "Subject",
@@ -823,19 +830,16 @@ def main():
         "SenderEmail":     "FromAddress",
         "SentDate":        "MessageDate",
         "BodyPlain":       "TextBody",
-        "BodyHtml":        "HtmlBody",     # filtered out below if --no-body-html
         "ToAddress":       "ToAddress",
         "CcAddress":       "CcAddress",
         "BccAddress":      "BccAddress",
         "IsClientManaged": "IsClientManaged",
         "FolderPath":      "Description",
     }
-    if args.no_body_html:
-        del email_col_map["BodyHtml"]
+    if not args.no_body_html:
+        email_col_map["BodyHtml"] = "HtmlBody"
 
-    # columns and rename are derived from the same dict — always in sync
-    email_src_cols = list(email_col_map.keys())
-    write_csv(extractor.emails, email_src_cols,
+    write_csv(extractor.emails, list(email_col_map.keys()),
               out_dir / "1_emails.csv", rename=email_col_map)
 
     # ---- 2. email_relations.csv  →  EmailMessageRelation (Insert) -------
