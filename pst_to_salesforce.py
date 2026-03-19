@@ -242,14 +242,14 @@ class PSTExtractor:
     def _walk_folder(self, folder, folder_path: str):
         """Recursively walk PST folders."""
         try:
-            folder_name = _safe_str(folder.name) or "Root"
+            folder_name = _safe_str(folder.get_name()) or "Root"
         except Exception:
             folder_name = "Unknown"
 
         current_path = f"{folder_path}/{folder_name}".lstrip("/")
 
         # Process messages in this folder
-        num_messages = folder.number_of_sub_messages
+        num_messages = folder.get_number_of_sub_messages()
         iterator = range(num_messages)
         if HAS_TQDM and num_messages > 0:
             iterator = tqdm(iterator, desc=f"📂 {current_path[:60]}", unit="msg", leave=False)
@@ -262,7 +262,7 @@ class PSTExtractor:
                 log.warning("Skipping message %d in '%s': %s", i, current_path, exc)
 
         # Recurse into sub-folders
-        for j in range(folder.number_of_sub_folders):
+        for j in range(folder.get_number_of_sub_folders()):
             try:
                 sub_folder = folder.get_sub_folder(j)
                 self._walk_folder(sub_folder, folder_path=current_path)
@@ -310,7 +310,7 @@ class PSTExtractor:
             _get_dt(message.get_client_submit_time)
             or _get_dt(message.get_delivery_time)
         )
-        has_attach = message.number_of_attachments > 0
+        has_attach = message.get_number_of_attachments() > 0
 
         self.emails.append({
             "Id":          email_id,      # internal surrogate key
@@ -335,7 +335,7 @@ class PSTExtractor:
         """Parse To / CC / BCC recipient headers."""
         # pypff exposes recipients via the recipients collection
         try:
-            num_recip = message.number_of_recipients
+            num_recip = message.get_number_of_recipients()
         except Exception:
             num_recip = 0
 
@@ -374,7 +374,7 @@ class PSTExtractor:
           6  ATTACH_OLE            — OLE object (not a plain file)
         Only method 0 and 2 are reliably readable as raw bytes.
         """
-        for i in range(message.number_of_attachments):
+        for i in range(message.get_number_of_attachments()):
             attach_id = str(uuid.uuid4())
             filename  = f"attachment_{i}"   # safe default before we know the real name
             try:
@@ -397,6 +397,11 @@ class PSTExtractor:
                 # ---- Attachment method -----------------------------------
                 try:
                     attach_method = int(attach.get_attachment_method() or 0)
+                except AttributeError:
+                    try:
+                        attach_method = int(attach.attachment_method or 0)
+                    except Exception:
+                        attach_method = 0
                 except Exception:
                     attach_method = 0
 
@@ -641,9 +646,9 @@ def _run_diagnose(pst_path: str):
     root = pst.get_root_folder()
 
     def find_first(folder, depth=0):
-        for i in range(folder.number_of_sub_messages):
+        for i in range(folder.get_number_of_sub_messages()):
             return folder.get_sub_message(i)
-        for j in range(folder.number_of_sub_folders):
+        for j in range(folder.get_number_of_sub_folders()):
             msg = find_first(folder.get_sub_folder(j), depth+1)
             if msg:
                 return msg
@@ -653,6 +658,13 @@ def _run_diagnose(pst_path: str):
         print("No messages found in PST.")
         pst.close()
         return
+
+    print(f"  number_of_sub_messages (folder): {root.get_number_of_sub_messages()}")
+    try:
+        print(f"  get_number_of_attachments(): {msg.get_number_of_attachments()}")
+        print(f"  get_number_of_recipients(): {msg.get_number_of_recipients()}")
+    except Exception as e:
+        print(f"  collection size methods ERROR: {e}")
 
     getters = [
         "get_subject", "get_sender_name", "get_conversation_topic",
@@ -685,7 +697,7 @@ def _run_diagnose(pst_path: str):
         except Exception as e:
             print(f"  .{prop} -> ERROR: {e}")
 
-    if msg.number_of_recipients > 0:
+    if msg.get_number_of_recipients() > 0:
         print("\n--- First recipient ---")
         r = msg.get_recipient(0)
         for g in ["get_name", "get_email_address", "get_recipient_type"]:
