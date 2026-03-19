@@ -257,6 +257,20 @@ class PSTExtractor:
 
     # ------------------------------------------------------------------
     def _process_message(self, message, folder_path: str):
+        # PST folders can contain non-email items (calendar entries, tasks,
+        # contacts, etc.).  Filter to IPM.Note* and common report/delivery
+        # classes; everything else would produce a blank row.
+        try:
+            msg_class = _safe_str(getattr(message, "message_class", "IPM.Note"))
+        except Exception:
+            msg_class = "IPM.Note"
+        if msg_class and not (
+            msg_class.upper().startswith("IPM.NOTE") or
+            msg_class.upper().startswith("REPORT.IPM.NOTE")
+        ):
+            log.debug("Skipping non-email item (class=%s) in %s", msg_class, folder_path)
+            return
+
         email_id = str(uuid.uuid4())
         self._email_count += 1
 
@@ -550,17 +564,22 @@ def write_csv(rows: list[dict], columns: list[str], out_path: Path, rename: dict
     for col in df.select_dtypes(include="bool").columns:
         df[col] = df[col].map({True: "TRUE", False: "FALSE"})
 
-    # Collapse embedded newlines so every record occupies exactly one CSV line.
-    # RFC 4180 allows quoted multiline fields, but most viewers (Excel, Numbers)
-    # treat any bare newline as a row boundary, which shifts all subsequent
-    # columns and inflates the apparent row count.
+    # Sanitise every string column before writing.
+    # - Null bytes (\x00) cause many parsers to silently truncate a field mid-value,
+    #   shifting all subsequent columns in that row.
+    # - Bare newlines/CRs (and the Unicode equivalents U+2028/U+2029) cause naive
+    #   readers to split one logical record across multiple physical lines, inflating
+    #   the row count and putting HTML body content into the ExternalId__c column.
     for col in df.select_dtypes(include="object").columns:
         df[col] = (
             df[col]
             .fillna("")
-            .str.replace("\r\n", "\\n", regex=False)
-            .str.replace("\r",   "\\n", regex=False)
-            .str.replace("\n",   "\\n", regex=False)
+            .str.replace("\x00",    "",    regex=False)   # null bytes
+            .str.replace("\r\n",   "\\n",  regex=False)   # Windows CRLF
+            .str.replace("\r",     "\\n",  regex=False)   # old Mac CR
+            .str.replace("\n",     "\\n",  regex=False)   # Unix LF
+            .str.replace("\u2028", "\\n",  regex=False)   # Unicode line separator
+            .str.replace("\u2029", "\\n",  regex=False)   # Unicode paragraph separator
         )
 
     df.to_csv(out_path, index=False, quoting=csv.QUOTE_ALL)
