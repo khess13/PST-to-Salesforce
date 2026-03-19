@@ -110,27 +110,32 @@ def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-# Reserved filenames on Windows (case-insensitive, with or without extension)
 _WINDOWS_RESERVED = re.compile(
     r'^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)', re.IGNORECASE
 )
-_MAX_PATH_COMPONENT = 200  # leave headroom for the directory prefix
 
 
-def _sanitise_filename(name: str) -> str:
-    """Remove illegal path characters and handle OS reserved names."""
+def _sanitise_filename(name: str, max_len: int = 200) -> str:
+    """Remove illegal path characters, handle OS reserved names, and truncate
+    the stem to stay within max_len — always preserving the file extension."""
     name = os.path.basename(name)
-    # Strip null bytes and common illegal characters
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
-    # Truncate individual component to stay within MAX_PATH headroom
-    if len(name) > _MAX_PATH_COMPONENT:
-        stem, _, ext = name.rpartition(".")
-        ext = ext[:10]  # cap extension too
-        name = stem[:_MAX_PATH_COMPONENT - len(ext) - 1] + "." + ext
-    # Replace Windows reserved names
     if _WINDOWS_RESERVED.match(name):
         name = f"_{name}"
-    return name or "attachment"
+    name = name or "attachment"
+
+    if len(name) > max_len:
+        # Split on the LAST dot so  "report.final.xlsx" -> stem="report.final", ext=".xlsx"
+        dot = name.rfind(".")
+        if dot > 0:
+            stem, ext = name[:dot], name[dot:]
+            ext = ext[:20]                          # cap extension length too
+            stem = stem[: max_len - len(ext)]
+            name = stem + ext
+        else:
+            name = name[:max_len]
+
+    return name
 
 
 # Matches the address in  "Display Name <addr@example.com>"  or bare  addr@example.com
@@ -295,103 +300,145 @@ class PSTExtractor:
 
     # ------------------------------------------------------------------
     def _extract_attachments(self, message, email_id: str):
-        """Extract attachment metadata (and optionally save binaries)."""
+        """Extract attachment metadata (and optionally save binaries).
+
+        MAPI attachment method values:
+          0  ATTACH_BY_VALUE       — binary data stored in PST, readable via read_buffer
+          1  ATTACH_BY_REFERENCE   — file path reference only, no binary in PST
+          2  ATTACH_BY_REF_RESOLVE — reference that may resolve to binary
+          4  ATTACH_EMBEDDED_MSG   — embedded Outlook message (.msg inside .msg)
+          6  ATTACH_OLE            — OLE object (not a plain file)
+        Only method 0 and 2 are reliably readable as raw bytes.
+        """
         for i in range(message.number_of_attachments):
+            attach_id = str(uuid.uuid4())
+            filename  = f"attachment_{i}"   # safe default before we know the real name
             try:
                 attach = message.get_attachment(i)
-                attach_id = str(uuid.uuid4())
 
-                filename   = _safe_str(attach.name) or f"attachment_{i}"
-                filename   = _sanitise_filename(filename)
+                # ---- Filename -------------------------------------------
+                # Try long filename first (PR_ATTACH_LONG_FILENAME), then
+                # short 8.3 name (PR_ATTACH_FILENAME / attach.name).
+                raw_name = (
+                    _safe_str(getattr(attach, "long_filename", None))
+                    or _safe_str(getattr(attach, "name", None))
+                    or ""
+                )
+                filename = _sanitise_filename(raw_name) if raw_name else f"attachment_{i}"
+
+                # ---- Attachment method -----------------------------------
+                attach_method = int(getattr(attach, "attachment_method", 0) or 0)
+
+                ATTACH_BY_VALUE       = 0
+                ATTACH_BY_REF_RESOLVE = 2
+                ATTACH_EMBEDDED_MSG   = 4
+                ATTACH_OLE            = 6
+
+                if attach_method == ATTACH_BY_VALUE or attach_method == ATTACH_BY_REF_RESOLVE:
+                    attach_type = "file"
+                elif attach_method == ATTACH_EMBEDDED_MSG:
+                    attach_type = "embedded_msg"
+                    # Give embedded messages an .msg extension for clarity
+                    if not filename.lower().endswith(".msg"):
+                        filename = filename + ".msg" if raw_name else f"embedded_{i}.msg"
+                elif attach_method == ATTACH_OLE:
+                    attach_type = "ole"
+                    filename = filename or f"ole_object_{i}.bin"
+                else:
+                    attach_type = f"unknown_method_{attach_method}"
+
+                # ---- Read binary data -----------------------------------
+                data       = None
                 size_bytes = 0
                 sha256     = ""
-                saved_path = ""
 
-                data = None
-                try:
-                    data = attach.read_buffer(attach.size)
-                    size_bytes = len(data)
-                    sha256 = _sha256(data)
-                except Exception:
-                    pass
-                
-                '''
-                if self.save_attachments and data and self.attachment_dir:
-                    # Save as  <attachment_dir>/<email_id>/<filename>
-                    dest_dir = self.attachment_dir / email_id
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    dest_file = dest_dir / filename
-                    # Avoid collisions
-                    if dest_file.exists():
-                        dest_file = dest_dir / f"{attach_id}_{filename}"
-                    dest_file.write_bytes(data)
-                    saved_path = str(dest_file)
-                ''''
-                if self.save_attachments and data and self.attachment_dir:
-                    dest_dir = self.attachment_dir / email_id
-                    
-                    # Verify the directory was actually created
+                if attach_method in (ATTACH_BY_VALUE, ATTACH_BY_REF_RESOLVE,
+                                     ATTACH_EMBEDDED_MSG, ATTACH_OLE):
                     try:
-                        dest_dir.mkdir(parents=True, exist_ok=True)
-                        if not dest_dir.exists():
-                            raise OSError(f"Directory was not created: {dest_dir}")
-                    except OSError as mkdir_exc:
-                        log.warning(
-                            "Could not create attachment directory '%s': %s — skipping save",
-                            dest_dir, mkdir_exc
-                        )
-                        # Still record metadata, just without a saved path
-                    else:
-                        # Check total path length before attempting write (Windows MAX_PATH)
-                        dest_file = dest_dir / filename
-                        if len(str(dest_file)) > 259:
-                            dest_file = dest_dir / f"{attach_id}.bin"
-                            log.warning(
-                                "Path too long for '%s' — saving as '%s'",
-                                filename, dest_file.name
-                            )
-
-                        if dest_file.exists():
-                            dest_file = dest_dir / f"{attach_id}_{filename}"
-                            # Re-check length after prepending uuid
-                            if len(str(dest_file)) > 259:
-                                dest_file = dest_dir / f"{attach_id}.bin"
-
+                        # Prefer read_buffer with no argument (reads all) where
+                        # supported; fall back to attach.size as the length hint.
                         try:
-                            dest_file.write_bytes(data)
-                            saved_path = str(dest_file)
-                        except OSError as write_exc:
-                            log.warning(
-                                "Could not write attachment '%s' (path len=%d): %s — "
-                                "retrying with uuid-only name",
-                                dest_file, len(str(dest_file)), write_exc
-                            )
-                            try:
-                                fallback = dest_dir / f"{attach_id}.bin"
-                                fallback.write_bytes(data)
-                                saved_path = str(fallback)
-                            except OSError as fallback_exc:
-                                log.error(
-                                    "Could not save attachment '%s' even with fallback name: %s",
-                                    attach_id, fallback_exc
-                                )
-                                
-                mime_type = _safe_str(getattr(attach, "mime_type", ""))
-                content_id = _safe_str(getattr(attach, "content_identifier", ""))
+                            data = attach.read_buffer(attach.size)
+                        except TypeError:
+                            # Some pypff builds accept no argument
+                            data = attach.read_buffer()
 
+                        if data:
+                            size_bytes = len(data)
+                            sha256     = _sha256(data)
+                        else:
+                            log.debug(
+                                "Attachment %d ('%s') on email %s returned empty buffer "
+                                "(method=%d)", i, filename, email_id, attach_method
+                            )
+                    except Exception as read_exc:
+                        log.warning(
+                            "Could not read buffer for attachment %d ('%s') on email %s "
+                            "(method=%d): %s", i, filename, email_id, attach_method, read_exc
+                        )
+                else:
+                    log.info(
+                        "Skipping attachment %d ('%s') on email %s — "
+                        "unsupported attachment method %d",
+                        i, filename, email_id, attach_method
+                    )
+
+                # ---- Optionally save to disk ----------------------------
+                saved_path = ""
+                if self.save_attachments and data and self.attachment_dir:
+                    # Use first 8 chars of uuid as subfolder — saves 28 chars vs full uuid
+                    short_id  = email_id[:8]
+                    dest_dir  = self.attachment_dir / short_id
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Calculate how many characters are left for the filename
+                    # on this specific machine (accounts for varying base-dir depth).
+                    MAX_PATH   = 259
+                    available  = MAX_PATH - len(str(dest_dir)) - 1  # -1 for separator
+                    available  = max(available, 20)                  # always allow minimum
+                    safe_name  = _sanitise_filename(filename, max_len=available)
+
+                    dest_file  = dest_dir / safe_name
+                    if dest_file.exists():
+                        # Collision: prefix with attachment index, re-truncate if needed
+                        prefix    = f"{i}_"
+                        safe_name = _sanitise_filename(filename, max_len=available - len(prefix))
+                        dest_file = dest_dir / f"{prefix}{safe_name}"
+
+                    try:
+                        dest_file.write_bytes(data)
+                        saved_path = str(dest_file)
+                        if safe_name != filename:
+                            log.debug(
+                                "Filename truncated: '%s' -> '%s'", filename, safe_name
+                            )
+                    except OSError as write_exc:
+                        log.warning(
+                            "Could not save attachment '%s' to disk: %s",
+                            dest_file, write_exc
+                        )
+
+                # ---- Collect metadata -----------------------------------
+                mime_type  = _safe_str(getattr(attach, "mime_type", ""))
+                content_id = _safe_str(getattr(attach, "content_identifier", ""))
 
                 self.attachments.append({
                     "Id":            attach_id,
-                    "EmailId":       email_id,      # FK → emails.Id
+                    "EmailId":       email_id,
                     "FileName":      filename,
+                    "AttachType":    attach_type,
                     "MimeType":      mime_type,
                     "SizeBytes":     size_bytes,
                     "SHA256":        sha256,
                     "ContentId":     content_id,
                     "SavedFilePath": saved_path,
                 })
+
             except Exception as exc:
-                log.warning("Could not extract attachment %d on email %s: %s", i, email_id, exc)
+                log.warning(
+                    "Could not extract attachment %d ('%s') on email %s: %s",
+                    i, filename, email_id, exc
+                )
 
 
 # ---------------------------------------------------------------------------
