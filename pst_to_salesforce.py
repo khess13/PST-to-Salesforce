@@ -186,8 +186,9 @@ def _parse_sender_email(message) -> str:
     Falls back to an empty string if headers are absent or unparseable.
     """
     try:
-        # transport_headers returns bytes in pypff — decode via _safe_str
-        raw = message.transport_headers
+        # Use get_transport_headers() — the confirmed pypff getter name.
+        # Returns bytes; _safe_str decodes them.
+        raw = message.get_transport_headers()
         headers = _safe_str(raw) if raw is not None else ""
     except Exception:
         return ""
@@ -274,27 +275,40 @@ class PSTExtractor:
         self._email_count += 1
 
         # ---- Core fields ------------------------------------------------
-        # pypff attribute names — subject/sender_name/transport_headers are str,
-        # plain_text_body/html_body/rtf_body return bytes and must be decoded.
-        # delivery_time is a datetime; client_submit_time is the sent timestamp.
-        subject      = _safe_str(message.subject)
-        sender       = _safe_str(message.sender_name)
+        # Use explicit get_*() methods — confirmed by pypff C source at
+        # github.com/libyal/libpff. Property access silently returns None
+        # on many pypff builds; getters raise AttributeError if unavailable,
+        # which _safe_call() converts to "".
+        def _get(fn, *args):
+            """Call a pypff getter safely; return '' on any error."""
+            try:
+                val = fn(*args)
+                return _safe_str(val)
+            except Exception:
+                return ""
+
+        def _get_dt(fn):
+            try:
+                return _safe_dt(fn())
+            except Exception:
+                return ""
+
+        subject      = _get(message.get_subject)
+        sender       = _get(message.get_sender_name)
         sender_email = _parse_sender_email(message)
 
-        # Body: plain_text_body returns bytes — decode via _safe_str.
-        # If it's RTF, _clean_body returns ""; fall through to html_body.
-        body_plain = _clean_body(_safe_str(message.plain_text_body))
+        # Body getters return bytes — _safe_str decodes them.
+        # plain_text_body may be RTF; _clean_body returns "" in that case.
+        body_plain = _clean_body(_get(message.get_plain_text_body))
         try:
-            body_html = _clean_body(_safe_str(message.html_body))
+            body_html = _clean_body(_get(message.get_html_body))
         except OSError:
-            # pypff raises OSError on some malformed html_body payloads
             body_html = ""
 
-        # pypff exposes both delivery_time (received) and client_submit_time (sent).
-        # Prefer client_submit_time for the sent date; fall back to delivery_time.
+        # client_submit_time = when sender sent; delivery_time = when received.
         sent_dt = (
-            _safe_dt(getattr(message, "client_submit_time", None))
-            or _safe_dt(getattr(message, "delivery_time", None))
+            _get_dt(message.get_client_submit_time)
+            or _get_dt(message.get_delivery_time)
         )
         has_attach = message.number_of_attachments > 0
 
@@ -333,13 +347,17 @@ class PSTExtractor:
                 type_map = {0: "To", 1: "CC", 2: "BCC"}
                 recip_type = type_map.get(int(recip_type_raw), "To")
 
+                def _rget(fn):
+                    try:
+                        return _safe_str(fn())
+                    except Exception:
+                        return ""
                 self.recipients.append({
-                    "Id":           str(uuid.uuid4()),
-                    "EmailId":      email_id,
+                    "Id":            str(uuid.uuid4()),
+                    "EmailId":       email_id,
                     "RecipientType": recip_type,
-                    # display_name and email_address may return bytes — _safe_str decodes
-                    "DisplayName":  _safe_str(getattr(recip, "display_name", None)),
-                    "EmailAddress": _safe_str(getattr(recip, "email_address", None)),
+                    "DisplayName":   _rget(recip.get_name),
+                    "EmailAddress":  _rget(recip.get_email_address),
                 })
             except Exception as exc:
                 log.debug("Could not parse recipient %d: %s", i, exc)
@@ -365,15 +383,22 @@ class PSTExtractor:
                 # ---- Filename -------------------------------------------
                 # Try long filename first (PR_ATTACH_LONG_FILENAME), then
                 # short 8.3 name (PR_ATTACH_FILENAME / attach.name).
-                raw_name = (
-                    _safe_str(getattr(attach, "long_filename", None))
-                    or _safe_str(getattr(attach, "name", None))
-                    or ""
-                )
+                raw_name = ""
+                for getter in ("get_long_filename", "get_name"):
+                    try:
+                        val = getattr(attach, getter)()
+                        raw_name = _safe_str(val)
+                        if raw_name:
+                            break
+                    except Exception:
+                        continue
                 filename = _sanitise_filename(raw_name) if raw_name else f"attachment_{i}"
 
                 # ---- Attachment method -----------------------------------
-                attach_method = int(getattr(attach, "attachment_method", 0) or 0)
+                try:
+                    attach_method = int(attach.get_attachment_method() or 0)
+                except Exception:
+                    attach_method = 0
 
                 ATTACH_BY_VALUE       = 0
                 ATTACH_BY_REF_RESOLVE = 2
@@ -404,7 +429,8 @@ class PSTExtractor:
                         # Prefer read_buffer with no argument (reads all) where
                         # supported; fall back to attach.size as the length hint.
                         try:
-                            data = attach.read_buffer(attach.size)
+                            attach_size = attach.get_size()
+                            data = attach.read_buffer(attach_size)
                         except TypeError:
                             # Some pypff builds accept no argument
                             data = attach.read_buffer()
@@ -601,6 +627,79 @@ def build_address_columns(recipients: list[dict]) -> dict[str, dict]:
 
 
 # ---------------------------------------------------------------------------
+# Diagnose helper
+# ---------------------------------------------------------------------------
+
+def _run_diagnose(pst_path: str):
+    """Open the PST, find the first message, and print every pypff getter
+    result so you can verify which attributes work on your specific build."""
+    import pypff
+    print("\n=== DIAGNOSE MODE ===")
+    print(f"PST: {pst_path}")
+    pst = pypff.file()
+    pst.open(pst_path)
+    root = pst.get_root_folder()
+
+    def find_first(folder, depth=0):
+        for i in range(folder.number_of_sub_messages):
+            return folder.get_sub_message(i)
+        for j in range(folder.number_of_sub_folders):
+            msg = find_first(folder.get_sub_folder(j), depth+1)
+            if msg:
+                return msg
+
+    msg = find_first(root)
+    if not msg:
+        print("No messages found in PST.")
+        pst.close()
+        return
+
+    getters = [
+        "get_subject", "get_sender_name", "get_conversation_topic",
+        "get_plain_text_body", "get_html_body", "get_rtf_body",
+        "get_transport_headers", "get_client_submit_time", "get_delivery_time",
+        "get_message_identifier",
+    ]
+    print("\n--- Message getters ---")
+    for g in getters:
+        try:
+            val = getattr(msg, g)()
+            if isinstance(val, bytes):
+                preview = repr(val[:80])
+                print(f"  {g}() -> bytes: {preview}")
+            else:
+                print(f"  {g}() -> {type(val).__name__}: {repr(str(val)[:120])}")
+        except AttributeError:
+            print(f"  {g}() -> ATTRIBUTE MISSING")
+        except Exception as e:
+            print(f"  {g}() -> ERROR: {e}")
+
+    print("\n--- Properties (for comparison) ---")
+    for prop in ["subject", "sender_name", "plain_text_body", "html_body",
+                 "transport_headers", "delivery_time"]:
+        try:
+            val = getattr(msg, prop)
+            print(f"  .{prop} -> {type(val).__name__}: {repr(str(val)[:80]) if val else None}")
+        except AttributeError:
+            print(f"  .{prop} -> ATTRIBUTE MISSING")
+        except Exception as e:
+            print(f"  .{prop} -> ERROR: {e}")
+
+    if msg.number_of_recipients > 0:
+        print("\n--- First recipient ---")
+        r = msg.get_recipient(0)
+        for g in ["get_name", "get_email_address", "get_recipient_type"]:
+            try:
+                val = getattr(r, g)()
+                print(f"  {g}() -> {repr(_safe_str(val))}")
+            except Exception as e:
+                print(f"  {g}() -> ERROR: {e}")
+
+    pst.close()
+    print("\n=== END DIAGNOSE ===\n")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -613,6 +712,10 @@ def main():
     parser.add_argument("--clean", action="store_true",
                         help="Delete any existing CSV files in --out before writing "
                              "(prevents stale column layouts from previous runs)")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="Print raw pypff attribute values from the first message "
+                             "and exit — use this to verify pypff works on your PST "
+                             "before running a full extraction")
     parser.add_argument(
         "--save-attachments", action="store_true",
         help="Save raw attachment binaries to disk inside <out>/attachment_files/",
@@ -639,6 +742,11 @@ def main():
     if args.save_attachments:
         attach_dir = (out_dir / "attachment_files").resolve()  # always absolute
         attach_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Diagnose mode -------------------------------------------------
+    if args.diagnose:
+        _run_diagnose(str(pst_path))
+        return
 
     # ---- Extract --------------------------------------------------------
     extractor = PSTExtractor(
