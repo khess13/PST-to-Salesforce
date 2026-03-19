@@ -310,7 +310,11 @@ class PSTExtractor:
             _get_dt(message.get_client_submit_time)
             or _get_dt(message.get_delivery_time)
         )
-        has_attach = message.get_number_of_attachments() > 0
+        try:
+            num_attach = message.get_number_of_attachments() or 0
+        except Exception:
+            num_attach = 0
+        has_attach = num_attach > 0
 
         self.emails.append({
             "Id":          email_id,      # internal surrogate key
@@ -332,31 +336,48 @@ class PSTExtractor:
 
     # ------------------------------------------------------------------
     def _extract_recipients(self, message, email_id: str):
-        """Parse To / CC / BCC recipient headers."""
-        # pypff exposes recipients via the recipients collection
+        """Parse To / CC / BCC recipients.
+
+        pypff recipient model (from libpff C API):
+          message.get_recipients() -> recipients container item
+          recipients.get_number_of_sub_items() -> int
+          recipients.get_sub_item(i) -> individual recipient item
+          recipient.get_display_name() -> str/bytes
+          recipient.get_email_address() -> str/bytes  (if available)
+          recipient.get_recipient_type() -> int  (0=To, 1=CC, 2=BCC)
+        """
+        def _rget(fn):
+            try:
+                return _safe_str(fn())
+            except Exception:
+                return ""
+
         try:
-            num_recip = message.get_number_of_recipients()
+            recipients = message.get_recipients()
+            if recipients is None:
+                return
+            num_recip = recipients.get_number_of_sub_items()
         except Exception:
-            num_recip = 0
+            return
+
+        type_map = {0: "To", 1: "CC", 2: "BCC"}
 
         for i in range(num_recip):
             try:
-                recip = message.get_recipient(i)
-                recip_type_raw = getattr(recip, "recipient_type", 0) or 0
-                # 0=To, 1=CC, 2=BCC (MAPI values)
-                type_map = {0: "To", 1: "CC", 2: "BCC"}
-                recip_type = type_map.get(int(recip_type_raw), "To")
+                recip = recipients.get_sub_item(i)
 
-                def _rget(fn):
-                    try:
-                        return _safe_str(fn())
-                    except Exception:
-                        return ""
+                # Recipient type — try getter first, fall back to property
+                try:
+                    recip_type_raw = int(recip.get_recipient_type() or 0)
+                except Exception:
+                    recip_type_raw = 0
+                recip_type = type_map.get(recip_type_raw, "To")
+
                 self.recipients.append({
                     "Id":            str(uuid.uuid4()),
                     "EmailId":       email_id,
                     "RecipientType": recip_type,
-                    "DisplayName":   _rget(recip.get_name),
+                    "DisplayName":   _rget(recip.get_display_name),
                     "EmailAddress":  _rget(recip.get_email_address),
                 })
             except Exception as exc:
@@ -374,7 +395,12 @@ class PSTExtractor:
           6  ATTACH_OLE            — OLE object (not a plain file)
         Only method 0 and 2 are reliably readable as raw bytes.
         """
-        for i in range(message.get_number_of_attachments()):
+        try:
+            num_attach = message.get_number_of_attachments() or 0
+        except Exception:
+            num_attach = 0
+
+        for i in range(num_attach):
             attach_id = str(uuid.uuid4())
             filename  = f"attachment_{i}"   # safe default before we know the real name
             try:
@@ -662,9 +688,14 @@ def _run_diagnose(pst_path: str):
     print(f"  number_of_sub_messages (folder): {root.get_number_of_sub_messages()}")
     try:
         print(f"  get_number_of_attachments(): {msg.get_number_of_attachments()}")
-        print(f"  get_number_of_recipients(): {msg.get_number_of_recipients()}")
     except Exception as e:
-        print(f"  collection size methods ERROR: {e}")
+        print(f"  get_number_of_attachments() ERROR: {e}")
+    try:
+        recip_container = msg.get_recipients()
+        n = recip_container.get_number_of_sub_items() if recip_container else 0
+        print(f"  get_recipients().get_number_of_sub_items(): {n}")
+    except Exception as e:
+        print(f"  get_recipients() ERROR: {e}")
 
     getters = [
         "get_subject", "get_sender_name", "get_conversation_topic",
@@ -697,10 +728,15 @@ def _run_diagnose(pst_path: str):
         except Exception as e:
             print(f"  .{prop} -> ERROR: {e}")
 
-    if msg.get_number_of_recipients() > 0:
+    try:
+        _rc = msg.get_recipients()
+        _nr = _rc.get_number_of_sub_items() if _rc else 0
+    except Exception:
+        _rc, _nr = None, 0
+    if _nr > 0:
         print("\n--- First recipient ---")
-        r = msg.get_recipient(0)
-        for g in ["get_name", "get_email_address", "get_recipient_type"]:
+        r = _rc.get_sub_item(0)
+        for g in ["get_display_name", "get_email_address", "get_recipient_type", "get_name"]:
             try:
                 val = getattr(r, g)()
                 print(f"  {g}() -> {repr(_safe_str(val))}")
