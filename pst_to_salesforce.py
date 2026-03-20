@@ -123,23 +123,29 @@ def _safe_str(value) -> str:
                 result = value.decode(enc).strip()
                 if _MOJIBAKE_RE.search(result):
                     result = _fix_mojibake(result)
-                # Collapse internal newlines — a \n in any scalar field
-                # (Subject, FromName etc.) splits CSV rows in Excel.
-                result = re.sub(r'\r\n|\r|\n', ' ', result).strip()
                 return result
             except (UnicodeDecodeError, AttributeError):
                 continue
-        return re.sub(r'\r\n|\r|\n', ' ',
-                      value.decode("latin-1", errors="replace")).strip()
+        return value.decode("latin-1", errors="replace").strip()
     try:
         text = str(value).strip()
         if _MOJIBAKE_RE.search(text):
             text = _fix_mojibake(text)
-        # Collapse internal newlines
-        text = re.sub(r'\r\n|\r|\n', ' ', text).strip()
         return text
     except Exception:
         return ""
+
+
+def _safe_scalar(value) -> str:
+    """Like _safe_str but collapses internal newlines to a single space.
+    Use for fields that must be single-line in CSV output: Subject,
+    FromName, FromAddress etc. Do NOT use for transport_headers which
+    depends on newlines for header field boundary detection.
+    """
+    text = _safe_str(value)
+    if '\n' in text or '\r' in text:
+        text = re.sub(r'\r\n|\r|\n', ' ', text).strip()
+    return text
 
 
 def _safe_dt(dt_obj) -> str:
@@ -432,11 +438,17 @@ class PSTExtractor:
         # github.com/libyal/libpff. Property access silently returns None
         # on many pypff builds; getters raise AttributeError if unavailable,
         # which _safe_call() converts to "".
-        def _get(fn, *args):
-            """Call a pypff getter safely; return '' on any error."""
+        def _get(fn):
+            """Call a pypff getter; decode via _safe_str (preserves newlines)."""
             try:
-                val = fn(*args)
-                return _safe_str(val)
+                return _safe_str(fn())
+            except Exception:
+                return ""
+
+        def _get_scalar(fn):
+            """Call a pypff getter; collapse newlines — for single-line fields."""
+            try:
+                return _safe_scalar(fn())
             except Exception:
                 return ""
 
@@ -446,8 +458,8 @@ class PSTExtractor:
             except Exception:
                 return ""
 
-        subject      = _get(message.get_subject)
-        sender       = _get(message.get_sender_name)
+        subject      = _get_scalar(message.get_subject)
+        sender       = _get_scalar(message.get_sender_name)
         sender_email = _parse_sender_email(message)
 
         # Body getters return bytes — _safe_str decodes and repairs encoding.
