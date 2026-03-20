@@ -108,39 +108,53 @@ def _safe_dt(dt_obj) -> str:
         return ""
 
 
-_RTF_HEADER_RE = re.compile(r'^\s*\{\\rtf', re.IGNORECASE)
-# Strips RTF control words like \pard\plain\f0 and braces
+_RTF_HEADER_RE  = re.compile(r'^\s*\{\\rtf', re.IGNORECASE)
+_HTML_HEAD_RE   = re.compile(r'<head[\s>].*?</head>',     re.IGNORECASE | re.DOTALL)
+_HTML_STYLE_RE  = re.compile(r'<style[\s>].*?</style>',   re.IGNORECASE | re.DOTALL)
+_HTML_SCRIPT_RE = re.compile(r'<script[\s>].*?</script>', re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE    = re.compile(r'<[^>]+>')
 _RTF_CONTROL_RE = re.compile(r'\{[^{}]*\}|\\[a-z]+\d*\s?|[{}]')
 
 
 def _strip_rtf(text: str) -> str:
-    """Best-effort plain text extraction from an RTF string."""
-    # Remove RTF control words and groups, collapse whitespace
+    # Best-effort plain text extraction from an RTF string.
     plain = _RTF_CONTROL_RE.sub(' ', text)
     plain = re.sub(r'[ \t]+', ' ', plain)
     plain = re.sub(r'\n{3,}', '\n\n', plain)
     return plain.strip()
 
 
+def _strip_html(text: str) -> str:
+    # Strip HTML to plain text, removing Word-generated head/style blocks.
+    # Word emails embed hundreds of lines of CSS/XML (w:LsdException,
+    # mso-font-pitch etc.) inside <head>/<style> before any body content.
+    text = _HTML_HEAD_RE.sub('', text)
+    text = _HTML_STYLE_RE.sub('', text)
+    text = _HTML_SCRIPT_RE.sub('', text)
+    text = _HTML_TAG_RE.sub(' ', text)
+    text = (text
+            .replace('&nbsp;', ' ')
+            .replace('&amp;',  '&')
+            .replace('&lt;',   '<')
+            .replace('&gt;',   '>')
+            .replace('&quot;', '"')
+            .replace('&#39;',  "'"))
+    text = re.sub(r'[ \t]+', ' ', text)
+    return text.strip()
+
+
 def _clean_body(text: str) -> str:
-    """
-    Sanitise email body text for safe CSV output.
-    - Removes null bytes and non-printable control characters
-    - Strips RTF markup to plain text instead of discarding it
-    - Collapses excessive blank lines
-    """
+    # Sanitise email body for safe CSV output.
+    # Strips RTF, HTML tags, and Word-generated style blocks to plain text.
     if not text:
-        return ""
-
-    # Null bytes and non-printable control chars break CSV parsers
-    text = text.replace("\x00", "")
-    text = re.sub(r"[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-
-    # RTF payload — strip markup to recover readable plain text
+        return ''
+    text = text.replace('\x00', '')
+    text = re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     if _RTF_HEADER_RE.match(text):
         text = _strip_rtf(text)
-
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    elif '<' in text and '>' in text and re.search(r'<[a-zA-Z]', text):
+        text = _strip_html(text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
@@ -691,7 +705,8 @@ def write_csv(rows: list[dict], columns: list[str], out_path: Path, rename: dict
 
     for col in df.select_dtypes(include="bool").columns:
         df[col] = df[col].map({True: "TRUE", False: "FALSE"})
-    df.to_csv(out_path, index=False, quoting=csv.QUOTE_ALL)
+    df.to_csv(out_path, index=False, quoting=csv.QUOTE_ALL,
+              doublequote=True, lineterminator="\r\n")
     log.info("  ✔ Written %d rows → %s", len(df), out_path)
 
 
