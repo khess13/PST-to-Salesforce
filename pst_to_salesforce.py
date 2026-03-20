@@ -202,6 +202,23 @@ def _clean_body(text: str) -> str:
     return text.strip()
 
 
+def _clean_html_body(text: str) -> str:
+    """Sanitise an HTML email body for Salesforce HtmlBody.
+
+    Unlike _clean_body, this preserves all HTML tags — Salesforce
+    HtmlBody expects the full HTML source. Only encoding repair,
+    null byte removal, and BOM stripping are applied.
+    """
+    if not text:
+        return ''
+    # Remove null bytes and BOM characters
+    text = text.replace('\x00', '').replace('\ufeff', '')
+    text = re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    # Mojibake repair is already handled by _safe_str/_fix_mojibake
+    # before this function is called — nothing more needed here.
+    return text
+
+
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -390,10 +407,12 @@ class PSTExtractor:
         sender       = _get(message.get_sender_name)
         sender_email = _parse_sender_email(message)
 
-        # Body getters return bytes — _safe_str decodes them.
+        # Body getters return bytes — _safe_str decodes and repairs encoding.
+        # body_plain: strip RTF/HTML markup to produce clean plain text.
+        # body_html:  preserve full HTML tags — only fix encoding and null bytes.
         body_plain = _clean_body(_get(message.get_plain_text_body))
         try:
-            body_html = _clean_body(_get(message.get_html_body))
+            body_html = _clean_html_body(_get(message.get_html_body))
         except OSError:
             body_html = ""
 
