@@ -529,60 +529,92 @@ class PSTExtractor:
         })
 
         # ---- Recipients -------------------------------------------------
-        self._extract_recipients(message, email_id)
+        self._extract_recipients(message, email_id, _hdrs)
 
         # ---- Attachments ------------------------------------------------
         if has_attach:
             self._extract_attachments(message, email_id)
 
     # ------------------------------------------------------------------
-    def _extract_recipients(self, message, email_id: str):
+    def _extract_recipients(self, message, email_id: str, transport_headers: str = ''):
         """Parse To / CC / BCC recipients.
 
-        pypff recipient model (from libpff C API):
-          message.get_recipients() -> recipients container item
-          recipients.get_number_of_sub_items() -> int
-          recipients.get_sub_item(i) -> individual recipient item
-          recipient.get_display_name() -> str/bytes
-          recipient.get_email_address() -> str/bytes  (if available)
-          recipient.get_recipient_type() -> int  (0=To, 1=CC, 2=BCC)
+        Primary source: message.get_recipients() container sub-items.
+        Fallback: parse To:/Cc:/Bcc: directly from transport_headers,
+        which always contains SMTP addresses even when the MAPI recipient
+        object returns empty email addresses (Exchange/X.400 internal).
         """
         def _rget(fn):
             try:
-                return _safe_str(fn())
+                return _safe_scalar(fn())
             except Exception:
                 return ""
 
+        added = 0
+
+        # ---- Primary: MAPI recipient sub-items --------------------------
         try:
             recipients = message.get_recipients()
-            if recipients is None:
-                return
-            num_recip = recipients.get_number_of_sub_items()
-        except Exception:
-            return
+            if recipients is not None:
+                num_recip = recipients.get_number_of_sub_items()
+                type_map = {0: "To", 1: "CC", 2: "BCC"}
 
-        type_map = {0: "To", 1: "CC", 2: "BCC"}
+                for i in range(num_recip):
+                    try:
+                        recip = recipients.get_sub_item(i)
+                        try:
+                            recip_type_raw = int(recip.get_recipient_type() or 0)
+                        except Exception:
+                            recip_type_raw = 0
+                        recip_type = type_map.get(recip_type_raw, "To")
+                        display  = _rget(recip.get_display_name)
+                        address  = _rget(recip.get_email_address)
+                        if display or address:
+                            self.recipients.append({
+                                "Id":            str(uuid.uuid4()),
+                                "EmailId":       email_id,
+                                "RecipientType": recip_type,
+                                "DisplayName":   display,
+                                "EmailAddress":  address,
+                            })
+                            added += 1
+                    except Exception as exc:
+                        log.debug("Recipient sub-item %d error: %s", i, exc)
+        except Exception as exc:
+            log.debug("get_recipients() failed for email %s: %s", email_id, exc)
 
-        for i in range(num_recip):
-            try:
-                recip = recipients.get_sub_item(i)
+        # ---- Fallback: parse transport_headers --------------------------
+        # Used when MAPI recipients returned nothing or had empty addresses.
+        # Uses the headers already parsed in _process_message — calling
+        # get_transport_headers() twice on the same object returns empty
+        # on some pypff builds (internal buffer cursor not reset).
+        if added == 0:
+            hdrs = transport_headers
 
-                # Recipient type — try getter first, fall back to property
-                try:
-                    recip_type_raw = int(recip.get_recipient_type() or 0)
-                except Exception:
-                    recip_type_raw = 0
-                recip_type = type_map.get(recip_type_raw, "To")
+            if hdrs:
+                type_to_relation = {
+                    "To":  "To",
+                    "Cc":  "CC",
+                    "Bcc": "BCC",
+                }
+                for field, recip_type in type_to_relation.items():
+                    raw = _parse_header_addresses(hdrs, field)
+                    if not raw:
+                        continue
+                    for addr in raw.split(";"):
+                        addr = addr.strip()
+                        if addr:
+                            self.recipients.append({
+                                "Id":            str(uuid.uuid4()),
+                                "EmailId":       email_id,
+                                "RecipientType": recip_type,
+                                "DisplayName":   "",
+                                "EmailAddress":  addr,
+                            })
+                            added += 1
 
-                self.recipients.append({
-                    "Id":            str(uuid.uuid4()),
-                    "EmailId":       email_id,
-                    "RecipientType": recip_type,
-                    "DisplayName":   _rget(recip.get_display_name),
-                    "EmailAddress":  _rget(recip.get_email_address),
-                })
-            except Exception as exc:
-                log.debug("Could not parse recipient %d: %s", i, exc)
+        if added == 0:
+            log.debug("No recipients found for email %s", email_id)
 
     # ------------------------------------------------------------------
     def _extract_attachments(self, message, email_id: str):
