@@ -82,7 +82,11 @@ def _safe_str(value) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):
-        for enc in ("utf-8", "cp1252", "latin-1"):
+        # utf-8-sig strips the BOM (\xEF\xBB\xBF) that Outlook embeds
+        # in some message bodies, then falls back through utf-8 and cp1252.
+        # latin-1 is the last resort — it never raises but may produce
+        # replacement characters for true encoding mismatches.
+        for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
             try:
                 return value.decode(enc).strip()
             except (UnicodeDecodeError, AttributeError):
