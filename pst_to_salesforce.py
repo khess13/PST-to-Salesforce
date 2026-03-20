@@ -74,26 +74,51 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Mojibake signatures — UTF-8 multibyte sequences decoded as latin-1/cp1252.
+# ï»¿ = UTF-8 BOM, â€™ = right single quote, â€œ/â€ = double quotes.
+_MOJIBAKE_RE = re.compile(r'ï»¿|â€[™œ]|Ã[©¨ ¨¨¬®°¶·¸¹º»¼½¾¿]')
+
+
+def _fix_mojibake(text: str) -> str:
+    """Re-encode latin-1 string back to bytes and decode as UTF-8.
+    pypff sometimes returns a str that was decoded as latin-1 when the
+    underlying bytes were actually UTF-8 — producing garbled characters.
+    """
+    try:
+        return text.encode("latin-1").decode("utf-8-sig")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        pass
+    try:
+        return text.encode("cp1252").decode("utf-8-sig")
+    except (UnicodeDecodeError, UnicodeEncodeError):
+        pass
+    return text
+
+
 def _safe_str(value) -> str:
-    """Return a clean UTF-8 string; never raises.
-    Handles bytes returned by pypff (plain_text_body, html_body, sender_name etc.)
-    by decoding with UTF-8 first, falling back to cp1252, then latin-1.
+    """Return a clean Unicode string; never raises.
+    - bytes: decoded via utf-8-sig -> utf-8 -> cp1252 -> latin-1
+    - str:   checked for mojibake (UTF-8 decoded as latin-1) and repaired
     """
     if value is None:
         return ""
     if isinstance(value, bytes):
-        # utf-8-sig strips the BOM (\xEF\xBB\xBF) that Outlook embeds
-        # in some message bodies, then falls back through utf-8 and cp1252.
-        # latin-1 is the last resort — it never raises but may produce
-        # replacement characters for true encoding mismatches.
         for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
             try:
-                return value.decode(enc).strip()
+                result = value.decode(enc).strip()
+                # Even after decoding bytes, check for nested mojibake
+                if _MOJIBAKE_RE.search(result):
+                    result = _fix_mojibake(result)
+                return result
             except (UnicodeDecodeError, AttributeError):
                 continue
         return value.decode("latin-1", errors="replace").strip()
     try:
-        return str(value).strip()
+        text = str(value).strip()
+        # pypff may return a str already decoded with the wrong codec
+        if _MOJIBAKE_RE.search(text):
+            text = _fix_mojibake(text)
+        return text
     except Exception:
         return ""
 
@@ -152,7 +177,7 @@ def _clean_body(text: str) -> str:
     # Strips RTF, HTML tags, and Word-generated style blocks to plain text.
     if not text:
         return ''
-    text = text.replace('\x00', '')
+    text = text.replace('\x00', '').replace('\ufeff', '')
     text = re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
     if _RTF_HEADER_RE.match(text):
         text = _strip_rtf(text)
