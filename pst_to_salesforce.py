@@ -330,6 +330,18 @@ def _parse_header_addresses(headers: str, field: str) -> str:
     return ';'.join(addrs)
 
 
+# Detects CSS/stylesheet content leaking into subject or body fields.
+# Occurs with malformed HTML emails where Outlook stored style definitions
+# in MAPI subject/body properties instead of proper email content.
+_CSS_CONTENT_RE = re.compile(
+    r'mso-|'
+    r'\.Mso[A-Z]|li\.mso|span\.|'
+    r'@font-face|font-family:|text-decoration:|'
+    r'color:#[0-9a-fA-F]{3,6}|margin:|padding:|font-size:',
+    re.IGNORECASE
+)
+
+
 # ---------------------------------------------------------------------------
 # Core extraction
 # ---------------------------------------------------------------------------
@@ -461,6 +473,15 @@ class PSTExtractor:
         if not any([subject, sender, sender_email, body_plain, body_html, sent_dt]):
             log.debug("Skipping non-email item in '%s' (no subject/sender/body/date)",
                       folder_path)
+            return
+
+        # Skip items where the subject contains CSS/stylesheet content.
+        # These are malformed HTML emails where Outlook stored Word stylesheet
+        # definitions (li.MsoNormal, mso-style-priority etc.) in the subject
+        # MAPI property — they produce rows of CSS noise, not real emails.
+        if subject and _CSS_CONTENT_RE.search(subject):
+            log.debug("Skipping CSS/stylesheet item in '%s' (subject: %s)",
+                      folder_path, subject[:60])
             return
 
         self.emails.append({
