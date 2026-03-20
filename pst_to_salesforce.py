@@ -363,6 +363,33 @@ _CSS_CONTENT_RE = re.compile(
 )
 
 
+def _parse_header_recipients(headers: str, field: str) -> list:
+    """Return list of (display_name, email_address) tuples from a header field.
+    Handles: 'Display Name <addr>', '"Name" <addr>', bare 'addr@example.com'.
+    """
+    pattern = re.compile(
+        rf'^{re.escape(field)}:\s*(.+?)(?=\n[^\t ]|\Z)',
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(headers)
+    if not m:
+        return []
+    raw = re.sub(r'\r?\n[\t ]', ' ', m.group(1)).strip()
+    results = []
+    for part in raw.split(','):
+        part = part.strip()
+        if not part:
+            continue
+        angle = re.search(r'^(.*?)<([^>]+)>', part)
+        if angle:
+            name = angle.group(1).strip().strip('"')
+            addr = angle.group(2).strip().lower()
+            results.append((name, addr))
+        elif '@' in part:
+            results.append(('', part.strip().lower()))
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Core extraction
 # ---------------------------------------------------------------------------
@@ -598,17 +625,13 @@ class PSTExtractor:
                     "Bcc": "BCC",
                 }
                 for field, recip_type in type_to_relation.items():
-                    raw = _parse_header_addresses(hdrs, field)
-                    if not raw:
-                        continue
-                    for addr in raw.split(";"):
-                        addr = addr.strip()
+                    for name, addr in _parse_header_recipients(hdrs, field):
                         if addr:
                             self.recipients.append({
                                 "Id":            str(uuid.uuid4()),
                                 "EmailId":       email_id,
                                 "RecipientType": recip_type,
-                                "DisplayName":   "",
+                                "DisplayName":   name,
                                 "EmailAddress":  addr,
                             })
                             added += 1
