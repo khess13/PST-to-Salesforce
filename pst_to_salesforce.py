@@ -189,7 +189,9 @@ def _strip_html(text: str) -> str:
 
 def _clean_body(text: str) -> str:
     # Sanitise email body for safe CSV output.
-    # Strips RTF, HTML tags, and Word-generated style blocks to plain text.
+    # Strips RTF/HTML to plain text and collapses all newlines to spaces
+    # so TextBody is always a single line — Excel splits rows on bare \n
+    # inside quoted fields regardless of the RFC 4180 spec.
     if not text:
         return ''
     text = text.replace('\x00', '').replace('\ufeff', '')
@@ -198,26 +200,37 @@ def _clean_body(text: str) -> str:
         text = _strip_rtf(text)
     elif '<' in text and '>' in text and re.search(r'<[a-zA-Z]', text):
         text = _strip_html(text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
+    # Collapse all newline variants to a single space
+    text = re.sub(r'\r\n|\r|\n', ' ', text)
+    text = re.sub(r' {2,}', ' ', text)
     return text.strip()
+
+
+# Matches base64-encoded data: URIs in HTML src/href attributes.
+# These inline image blobs can be 10,000-30,000+ characters and
+# cause field-length explosions and row splits in CSV output.
+_DATA_URI_RE = re.compile(
+    r'(src|href)=(["\'])data:[^;]+;base64,[A-Za-z0-9+/=\s]+\2',
+    re.IGNORECASE
+)
 
 
 def _clean_html_body(text: str) -> str:
     """Sanitise an HTML email body for Salesforce HtmlBody.
 
-    Preserves all HTML tags. Collapses newlines to spaces so the entire
-    HTML is a single line — multiline HTML inside a CSV cell causes row
-    boundary splits in Excel and other parsers even with QUOTE_ALL.
+    Preserves all HTML tags. Strips base64 data: URIs (inline images)
+    which can be tens of thousands of characters and break CSV row
+    boundaries. Collapses newlines to spaces for single-line output.
     """
     if not text:
         return ''
     # Remove null bytes, BOM, and non-printable control characters
     text = text.replace('\x00', '').replace('\ufeff', '')
     text = re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
-    # Collapse all newline variants to a single space so the HTML sits
-    # on one line — prevents CSV row splits in Excel and Data Loader.
+    # Strip base64 data: URIs — replace with placeholder so HTML stays valid
+    text = _DATA_URI_RE.sub(r'\1="[embedded-image]"', text)
+    # Collapse all newline variants to a single space
     text = re.sub(r'\r\n|\r|\n', ' ', text)
-    # Collapse runs of whitespace created by the above
     text = re.sub(r'[ \t]{2,}', ' ', text)
     return text.strip()
 
