@@ -121,18 +121,22 @@ def _safe_str(value) -> str:
         for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
             try:
                 result = value.decode(enc).strip()
-                # Even after decoding bytes, check for nested mojibake
                 if _MOJIBAKE_RE.search(result):
                     result = _fix_mojibake(result)
+                # Collapse internal newlines — a \n in any scalar field
+                # (Subject, FromName etc.) splits CSV rows in Excel.
+                result = re.sub(r'\r\n|\r|\n', ' ', result).strip()
                 return result
             except (UnicodeDecodeError, AttributeError):
                 continue
-        return value.decode("latin-1", errors="replace").strip()
+        return re.sub(r'\r\n|\r|\n', ' ',
+                      value.decode("latin-1", errors="replace")).strip()
     try:
         text = str(value).strip()
-        # pypff may return a str already decoded with the wrong codec
         if _MOJIBAKE_RE.search(text):
             text = _fix_mojibake(text)
+        # Collapse internal newlines
+        text = re.sub(r'\r\n|\r|\n', ' ', text).strip()
         return text
     except Exception:
         return ""
