@@ -390,6 +390,37 @@ def _parse_header_recipients(headers: str, field: str) -> list:
     return results
 
 
+# Filenames matching these patterns are junk — Word temp files, OLE internals,
+# tracking pixels, and Windows system files that end up as MAPI attachments.
+_JUNK_FILENAME_RE = re.compile(
+    r'^~'               # Word temp/lock files (~WRD0000.jpg, ~$document.docx)
+    r'|^Thumbs\.db$'   # Windows thumbnail cache
+    r'|^desktop\.ini$' # Windows folder settings
+    r'|\.tmp$'         # Generic temp files
+    r'|^image\d+\.wmz$'  # Word internal metafile images
+    r'|^oledata\.mso$' # OLE compound document stub
+    , re.IGNORECASE
+)
+# Small images under this size are treated as tracking pixels / decorations
+_TRACKING_PIXEL_EXTENSIONS = {'.gif', '.png', '.jpg', '.jpeg', '.bmp', '.wmz'}
+_TRACKING_PIXEL_MAX_BYTES  = 1024
+
+
+def _is_junk_attachment(filename: str, size_bytes: int) -> bool:
+    """Return True if the attachment should be excluded from the CSV output.
+    Filters Word temp files, OLE stubs, tracking pixels, and Windows
+    system files that Outlook stores as MAPI attachments internally.
+    """
+    if not filename:
+        return False
+    if _JUNK_FILENAME_RE.search(filename):
+        return True
+    ext = ('.' + filename.rsplit('.', 1)[-1].lower()) if '.' in filename else ''
+    if ext in _TRACKING_PIXEL_EXTENSIONS and size_bytes < _TRACKING_PIXEL_MAX_BYTES:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Core extraction
 # ---------------------------------------------------------------------------
@@ -676,6 +707,15 @@ class PSTExtractor:
                         continue
                 filename = _sanitise_filename(raw_name) if raw_name else f"attachment_{i}"
 
+                # ---- Junk filter ----------------------------------------
+                # Skip Word temp files, OLE stubs, and tracking pixels.
+                # Size is not yet known here so pass 0 — name-based rules
+                # still apply. Size-based check runs after read_buffer.
+                if _is_junk_attachment(raw_name, 0):
+                    log.debug("Skipping junk attachment '%s' on email %s",
+                              filename, email_id)
+                    continue
+
                 # ---- Attachment method -----------------------------------
                 try:
                     attach_method = int(attach.get_attachment_method() or 0)
@@ -725,6 +765,14 @@ class PSTExtractor:
                         if data:
                             size_bytes = len(data)
                             sha256     = _sha256(data)
+                            # Size-based junk check — small images are
+                            # tracking pixels or inline decorations
+                            if _is_junk_attachment(filename, size_bytes):
+                                log.debug(
+                                    "Skipping tracking pixel '%s' (%d bytes)",
+                                    filename, size_bytes
+                                )
+                                continue
                         else:
                             log.debug(
                                 "Attachment %d ('%s') on email %s returned empty buffer "
