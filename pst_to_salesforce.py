@@ -74,25 +74,40 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Mojibake signatures — UTF-8 multibyte sequences decoded as latin-1/cp1252.
-# ï»¿ = UTF-8 BOM, â€™ = right single quote, â€œ/â€ = double quotes.
-_MOJIBAKE_RE = re.compile(r'ï»¿|â€[™œ]|Ã[©¨ ¨¨¬®°¶·¸¹º»¼½¾¿]')
+# Matches cp1252/latin-1 range character sequences that are
+# valid UTF-8 multibyte sequences misread with the wrong codec.
+# Covers 2-byte (Ã©), 3-byte (â€™), and BOM (ï»¿) patterns.
+_MOJIBAKE_RE = re.compile(
+    r'[\xc0-\xff][\x80-\xbf]+'
+    r'|ï»¿'
+    r'|Â[\x80-\xbf]'
+    r'|Ã[\x80-\xbf\xa0-\xbf]'
+    r'|â€[\x80-\xbf\x9c-\x9f™œ]'
+)
 
 
 def _fix_mojibake(text: str) -> str:
-    """Re-encode latin-1 string back to bytes and decode as UTF-8.
-    pypff sometimes returns a str that was decoded as latin-1 when the
-    underlying bytes were actually UTF-8 — producing garbled characters.
+    """Fix mojibake sequences individually without touching genuine Unicode.
+
+    Operates match-by-match so that strings containing a mix of real Unicode
+    characters (emoji, CJK, etc.) and mojibake sequences are handled correctly.
+    The whole-string encode approach fails on mixed content because genuine
+    Unicode chars above cp1252 range prevent re-encoding the entire string.
     """
-    try:
-        return text.encode("latin-1").decode("utf-8-sig")
-    except (UnicodeDecodeError, UnicodeEncodeError):
-        pass
-    try:
-        return text.encode("cp1252").decode("utf-8-sig")
-    except (UnicodeDecodeError, UnicodeEncodeError):
-        pass
-    return text
+    if not _MOJIBAKE_RE.search(text):
+        return text
+
+    def _replace(m: re.Match) -> str:
+        seq = m.group(0)
+        for enc in ('cp1252', 'latin-1'):
+            try:
+                return seq.encode(enc).decode('utf-8')
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                continue
+        return seq
+
+    return _MOJIBAKE_RE.sub(_replace, text)
+
 
 
 def _safe_str(value) -> str:
