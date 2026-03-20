@@ -153,10 +153,12 @@ def _safe_dt(dt_obj) -> str:
 
 
 _RTF_HEADER_RE  = re.compile(r'^\s*\{\\rtf', re.IGNORECASE)
-_HTML_HEAD_RE   = re.compile(r'<head[\s>].*?</head>',     re.IGNORECASE | re.DOTALL)
-_HTML_STYLE_RE  = re.compile(r'<style[\s>].*?</style>',   re.IGNORECASE | re.DOTALL)
-_HTML_SCRIPT_RE = re.compile(r'<script[\s>].*?</script>', re.IGNORECASE | re.DOTALL)
-_HTML_TAG_RE    = re.compile(r'<[^>]+>')
+_HTML_HEAD_RE      = re.compile(r'<head[\s>].*?</head>',                  re.IGNORECASE | re.DOTALL)
+_HTML_STYLE_RE     = re.compile(r'<style[\s>].*?</style>',                re.IGNORECASE | re.DOTALL)
+_HTML_SCRIPT_RE    = re.compile(r'<script[\s>].*?</script>',              re.IGNORECASE | re.DOTALL)
+_HTML_MSO_XML_RE   = re.compile(r'<!--\[if[^\]]*\]>.*?<!\[endif\]-->', re.IGNORECASE | re.DOTALL)
+_HTML_XML_RE       = re.compile(r'<xml[\s>].*?</xml>',                    re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE       = re.compile(r'<[^>]+')
 _RTF_CONTROL_RE = re.compile(r'\{[^{}]*\}|\\[a-z]+\d*\s?|[{}]')
 
 
@@ -170,8 +172,12 @@ def _strip_rtf(text: str) -> str:
 
 def _strip_html(text: str) -> str:
     # Strip HTML to plain text, removing Word-generated head/style blocks.
-    # Word emails embed hundreds of lines of CSS/XML (w:LsdException,
-    # mso-font-pitch etc.) inside <head>/<style> before any body content.
+    # Also removes MSO conditional comment blocks (<!--[if gte mso 9]>...)
+    # and <xml> blocks containing w:LsdException schema definitions —
+    # these survive <head> stripping and cause CSV row splits via the
+    # double-quote escaping of their XML attributes.
+    text = _HTML_MSO_XML_RE.sub('', text)
+    text = _HTML_XML_RE.sub('', text)
     text = _HTML_HEAD_RE.sub('', text)
     text = _HTML_STYLE_RE.sub('', text)
     text = _HTML_SCRIPT_RE.sub('', text)
@@ -227,6 +233,11 @@ def _clean_html_body(text: str) -> str:
     # Remove null bytes, BOM, and non-printable control characters
     text = text.replace('\x00', '').replace('\ufeff', '')
     text = re.sub(r'[\x01-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    # Strip MSO conditional comment blocks and <xml> schema blocks —
+    # these contain w:LsdException attributes with ""double-quoted"" values
+    # that break CSV parsers even inside quoted fields.
+    text = _HTML_MSO_XML_RE.sub('', text)
+    text = _HTML_XML_RE.sub('', text)
     # Strip base64 data: URIs — replace with placeholder so HTML stays valid
     text = _DATA_URI_RE.sub(r'\1="[embedded-image]"', text)
     # Collapse all newline variants to a single space
