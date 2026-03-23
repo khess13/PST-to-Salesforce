@@ -410,12 +410,16 @@ def _is_junk_attachment(filename: str, size_bytes: int) -> bool:
     """Return True if the attachment should be excluded from the CSV output.
     Filters Word temp files, OLE stubs, tracking pixels, and Windows
     system files that Outlook stores as MAPI attachments internally.
+    Always uses the basename — pypff may return a full path prefix
+    (e.g. C:\\~WRD0004.jpg) which would prevent ^~ from matching.
     """
     if not filename:
         return False
-    if _JUNK_FILENAME_RE.search(filename):
+    # Strip any path prefix before testing — ^~ must match the filename itself
+    name = os.path.basename(filename)
+    if _JUNK_FILENAME_RE.search(name):
         return True
-    ext = ('.' + filename.rsplit('.', 1)[-1].lower()) if '.' in filename else ''
+    ext = ('.' + name.rsplit('.', 1)[-1].lower()) if '.' in name else ''
     if ext in _TRACKING_PIXEL_EXTENSIONS and size_bytes < _TRACKING_PIXEL_MAX_BYTES:
         return True
     return False
