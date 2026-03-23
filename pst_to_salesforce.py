@@ -587,7 +587,6 @@ class PSTExtractor:
             "CcAddress":       _cc_hdr,
             "BccAddress":      _bcc_hdr,
             "IsClientManaged": True,
-            "FolderPath":      folder_path,
             "Incoming":        True,
             "ParentId":        "",
         })
@@ -1141,7 +1140,6 @@ def main():
         "CcAddress":       "CcAddress",
         "BccAddress":      "BccAddress",
         "IsClientManaged": "IsClientManaged",
-        "FolderPath":      "Description",
         "Incoming":        "Incoming",
         "ParentId":        "ParentId",
     }
