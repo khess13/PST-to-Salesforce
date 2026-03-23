@@ -595,6 +595,7 @@ class PSTExtractor:
 
         self.emails.append({
             "Id":              email_id,
+            "_hdrs_debug":     _hdrs,   # removed before CSV write
             "Subject":         subject,
             "SenderName":      sender,
             "SenderEmail":     sender_email,
@@ -1185,6 +1186,17 @@ def main():
         # the mailbox owner. Fill from --mailbox-email if still blank.
         if not email["ToAddress"] and mailbox_email:
             email["ToAddress"] = mailbox_email
+        # Log emails where ToAddress is still empty after all fallbacks
+        # so we can inspect what pypff returned for transport_headers.
+        if not email["ToAddress"]:
+            hdrs = email.get("_hdrs_debug", "")
+            log.warning(
+                "No ToAddress resolved for email %s (Subject: %s) | "
+                "headers start: %s",
+                email["Id"][:8],
+                email["Subject"][:40],
+                repr(hdrs[:200]) if hdrs else "EMPTY",
+            )
         # IsClientManaged already set to True in _process_message
 
     # ---- 1. emails.csv  →  EmailMessage (Insert) ------------------------
