@@ -368,6 +368,10 @@ def _parse_header_addresses(headers: str, field: str) -> str:
     return ';'.join(addrs)
 
 
+# Extracts 6-digit application number from the end of a subject line
+_APP_NUM_RE = re.compile(r'\b(\d{6})\s*$')
+
+
 # Detects CSS/stylesheet content leaking into subject or body fields.
 # Occurs with malformed HTML emails where Outlook stored style definitions
 # in MAPI subject/body properties instead of proper email content.
@@ -597,6 +601,8 @@ class PSTExtractor:
             "Id":              email_id,
             "_hdrs_debug":     _hdrs,   # removed before CSV write
             "Subject":         subject,
+            "ApplicationNumber": (_APP_NUM_RE.search(subject).group(1)
+                                  if subject and _APP_NUM_RE.search(subject) else ""),
             "SenderName":      sender,
             "SenderEmail":     sender_email,
             "SentDate":        sent_dt,
@@ -1257,6 +1263,7 @@ def main():
     email_col_map = {
         "Id":              "ExternalId__c",
         "Subject":         "Subject",
+        "ApplicationNumber": "ApplicationNumber",
         "SenderName":      "FromName",
         "SenderEmail":     "FromAddress",
         "SentDate":        "MessageDate",
