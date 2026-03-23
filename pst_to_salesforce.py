@@ -652,7 +652,13 @@ class PSTExtractor:
                             recip_type_raw = 0
                         recip_type = type_map.get(recip_type_raw, "To")
                         display  = _rget(recip.get_display_name)
-                        address  = _rget(recip.get_email_address)
+                        # Try get_name() if get_display_name() returns empty
+                        if not display:
+                            display = _rget(recip.get_name) if hasattr(recip, 'get_name') else ''
+                        # get_email_address may return Exchange X.400 address —
+                        # filter those out, they're not usable SMTP addresses
+                        raw_addr = _rget(recip.get_email_address)
+                        address  = raw_addr if raw_addr and '@' in raw_addr and not _EXCHANGE_ADDR_RE.search(raw_addr) else ''
                         if display or address:
                             self.recipients.append({
                                 "Id":            str(uuid.uuid4()),
@@ -662,6 +668,12 @@ class PSTExtractor:
                                 "EmailAddress":  address,
                             })
                             added += 1
+                        else:
+                            log.debug(
+                                "Recipient sub-item %d on email %s has no "
+                                "usable name or address (raw_addr=%s)",
+                                i, email_id[:8], repr(raw_addr[:60]) if raw_addr else 'EMPTY'
+                            )
                     except Exception as exc:
                         log.debug("Recipient sub-item %d error: %s", i, exc)
         except Exception as exc:
