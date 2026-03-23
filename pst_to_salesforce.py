@@ -584,6 +584,8 @@ class PSTExtractor:
             "BccAddress":      _bcc_hdr,
             "IsClientManaged": True,
             "FolderPath":      folder_path,
+            "Incoming":        True,
+            "ParentId":        "",
         })
 
         # ---- Recipients -------------------------------------------------
@@ -898,7 +900,7 @@ SF_CONTENT_VERSION_FIELDS = {
     "Id":                      "ExternalId__c",       # custom ext-id on ContentVersion
     "EmailSfId":               "FirstPublishLocationId",  # EmailMessage SF Id (from step-1)
     "FileName":                "Title",
-    "FileName":                "PathOnClient",         # must match Title for Data Loader
+    "PathOnClient":            "PathOnClient",         # must match Title for Data Loader
     "MimeType":                "VersionDataUrl",       # see note below *
     "SizeBytes":               "ContentSize",
     "SHA256":                  "Checksum",
@@ -1136,6 +1138,8 @@ def main():
         "BccAddress":      "BccAddress",
         "IsClientManaged": "IsClientManaged",
         "FolderPath":      "Description",
+        "Incoming":        "Incoming",
+        "ParentId":        "ParentId",
     }
     if not args.no_body_html:
         email_col_map["BodyHtml"] = "HtmlBody"
@@ -1188,9 +1192,6 @@ def main():
     # ---- 4. email_status_update.csv  →  EmailMessage (Update) ----------
     # Load LAST. Setting Status=3 (Sent) makes the record read-only.
     # Use the Data Loader result file from step 1 to get real SF Ids.
-    status_rows = [{"ExternalId__c": e["ExternalId__c"] if "ExternalId__c" in e else e["Id"],
-                    "Status": "3"} for e in extractor.emails]
-    # Rebuild from the already-renamed emails if needed
     status_rows = [{"ExternalId__c": e["Id"], "Status": "3"} for e in extractor.emails]
     write_csv(
         status_rows,
