@@ -328,8 +328,16 @@ _HEADER_FIELD_RE = re.compile(
 )
 
 
+# Detects Exchange internal / X.400 addresses that have no SMTP form
+_EXCHANGE_ADDR_RE = re.compile(r'^/O=|^X400:|IMCEAEX-', re.IGNORECASE)
+
+
 def _parse_header_addresses(headers: str, field: str) -> str:
-    """Extract a semicolon-delimited address list from a named header field."""
+    """Extract a semicolon-delimited address list from a named header field.
+    Accepts SMTP addresses, angle-bracket addresses, and display-name-only
+    entries (sent items often have no SMTP address in the To: header).
+    Exchange internal addresses (/O=...) are skipped.
+    """
     pattern = re.compile(
         rf'^{re.escape(field)}:\s*(.+?)(?=\n[^\t ]|\Z)',
         re.IGNORECASE | re.MULTILINE | re.DOTALL,
@@ -337,17 +345,26 @@ def _parse_header_addresses(headers: str, field: str) -> str:
     m = pattern.search(headers)
     if not m:
         return ""
-    # Unfold continuation lines, split on commas, extract bare addresses
     raw = re.sub(r'\r?\n[\t ]', ' ', m.group(1)).strip()
     addrs = []
-    for part in raw.split(','):
+    # Split on comma OR semicolon — Outlook uses semicolons to separate
+    # multiple recipients in transport_headers (non-standard but common)
+    for part in re.split(r'[,;]', raw):
         part = part.strip()
+        if not part:
+            continue
         # "Display Name <addr@example.com>" -> addr@example.com
         angle = re.search(r'<([^>]+)>', part)
         if angle:
-            addrs.append(angle.group(1).strip().lower())
-        elif '@' in part:
+            addr = angle.group(1).strip()
+            if not _EXCHANGE_ADDR_RE.search(addr):
+                addrs.append(addr.lower())
+        elif '@' in part and not _EXCHANGE_ADDR_RE.search(part):
             addrs.append(part.lower())
+        elif part and not _EXCHANGE_ADDR_RE.search(part):
+            # Display name only — no SMTP address available
+            # Store as-is so the recipient is not silently dropped
+            addrs.append(part)
     return ';'.join(addrs)
 
 
@@ -376,7 +393,7 @@ def _parse_header_recipients(headers: str, field: str) -> list:
         return []
     raw = re.sub(r'\r?\n[\t ]', ' ', m.group(1)).strip()
     results = []
-    for part in raw.split(','):
+    for part in re.split(r'[,;]', raw):
         part = part.strip()
         if not part:
             continue
@@ -385,8 +402,11 @@ def _parse_header_recipients(headers: str, field: str) -> list:
             name = angle.group(1).strip().strip('"')
             addr = angle.group(2).strip().lower()
             results.append((name, addr))
-        elif '@' in part:
+        elif '@' in part and not _EXCHANGE_ADDR_RE.search(part):
             results.append(('', part.strip().lower()))
+        elif part and not _EXCHANGE_ADDR_RE.search(part):
+            # Display name only — store with blank address
+            results.append((part.strip(), ''))
     return results
 
 
@@ -671,6 +691,35 @@ class PSTExtractor:
                                 "EmailAddress":  addr,
                             })
                             added += 1
+
+        # ---- Second fallback: PR_DISPLAY_TO/CC/BCC MAPI properties ----
+        # Sent items sometimes have no transport_headers but store
+        # recipient display names in these flat MAPI string properties.
+        if added == 0:
+            display_map = {
+                "To":  "get_display_to",
+                "CC":  "get_display_cc",
+                "BCC": "get_display_bcc",
+            }
+            for recip_type, getter_name in display_map.items():
+                try:
+                    val = _safe_scalar(getattr(message, getter_name)())
+                    if not val:
+                        continue
+                    # These are semicolon-delimited display name strings
+                    for name in val.split(';'):
+                        name = name.strip()
+                        if name and not _EXCHANGE_ADDR_RE.search(name):
+                            self.recipients.append({
+                                "Id":            str(uuid.uuid4()),
+                                "EmailId":       email_id,
+                                "RecipientType": recip_type,
+                                "DisplayName":   name,
+                                "EmailAddress":  "",
+                            })
+                            added += 1
+                except Exception:
+                    pass
 
         if added == 0:
             log.debug("No recipients found for email %s", email_id)
@@ -1081,6 +1130,12 @@ def main():
         "--no-body-html", action="store_true",
         help="Omit HtmlBody from EmailMessage CSV (reduces file size)",
     )
+    parser.add_argument(
+        "--mailbox-email", default="",
+        help="Email address of the PST mailbox owner (e.g. jane@company.com). "
+             "Used to populate ToAddress on inbound replies where Outlook omits "
+             "the To: header because the recipient is the mailbox owner.",
+    )
     args = parser.parse_args()
 
     pst_path = Path(args.pst)
@@ -1115,6 +1170,7 @@ def main():
 
     # ---- Collapse recipients into ToAddress/CcAddress/BccAddress --------
     addr_by_email = build_address_columns(extractor.recipients)
+    mailbox_email = args.mailbox_email.strip().lower()
     for email in extractor.emails:
         addrs = addr_by_email.get(email["Id"], {})
         # Only overwrite header-parsed addresses if recipient sub-items
@@ -1125,6 +1181,10 @@ def main():
             email["CcAddress"]  = addrs["CcAddress"]
         if addrs.get("BccAddress"):
             email["BccAddress"] = addrs["BccAddress"]
+        # For inbound replies, Outlook omits To: because the recipient is
+        # the mailbox owner. Fill from --mailbox-email if still blank.
+        if not email["ToAddress"] and mailbox_email:
+            email["ToAddress"] = mailbox_email
         # IsClientManaged already set to True in _process_message
 
     # ---- 1. emails.csv  →  EmailMessage (Insert) ------------------------
