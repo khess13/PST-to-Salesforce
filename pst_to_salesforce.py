@@ -1233,6 +1233,15 @@ def main():
     print("    ContentDocumentLink — no separate step needed")
     print("  • Use Salesforce Data Loader (not Data Import Wizard) for")
     print("    EmailMessage — the wizard doesn't support this object")
+    print()
+    print("  ── Data Loader Settings ────────────────────────────────────")
+    print("  • Set batch size to 200 rows:")
+    print("    Data Loader → Settings → Batch size for insert/update → 200")
+    print("  • Load files as single files — Data Loader handles batching")
+    print("    automatically. Do not manually split the CSV files as this")
+    print("    risks breaking EmailMessageId relationships across batches.")
+    print("  • Do NOT load file 4 (Status update) until files 1-3 are")
+    print("    fully loaded and verified — Status=3 locks records read-only.")
     print("="*65 + "\n")
 
 
