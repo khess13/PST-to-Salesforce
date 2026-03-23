@@ -669,7 +669,7 @@ class PSTExtractor:
                             })
                             added += 1
                         else:
-                            log.debug(
+                            log.warning(
                                 "Recipient sub-item %d on email %s has no "
                                 "usable name or address (raw_addr=%s)",
                                 i, email_id[:8], repr(raw_addr[:60]) if raw_addr else 'EMPTY'
