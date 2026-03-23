@@ -1149,6 +1149,13 @@ def main():
              "Used to populate ToAddress on inbound replies where Outlook omits "
              "the To: header because the recipient is the mailbox owner.",
     )
+    parser.add_argument(
+        "--dedupe", action="store_true",
+        help="Remove duplicate emails. Two emails are considered duplicates if "
+             "they share the same SenderEmail, SentDate, Subject, and ToAddress. "
+             "The first occurrence is kept. Recipients and attachments for "
+             "removed duplicates are also dropped.",
+    )
     args = parser.parse_args()
 
     pst_path = Path(args.pst)
@@ -1210,6 +1217,40 @@ def main():
                 repr(hdrs[:200]) if hdrs else "EMPTY",
             )
         # IsClientManaged already set to True in _process_message
+
+    # ---- Deduplication --------------------------------------------------
+    if args.dedupe:
+        seen = set()
+        removed_ids = set()
+        unique_emails = []
+        for email in extractor.emails:
+            # Key: sender + date + subject + to (normalised)
+            key = (
+                email["SenderEmail"].lower().strip(),
+                email["SentDate"],
+                email["Subject"].lower().strip(),
+                email["ToAddress"].lower().strip(),
+            )
+            if key in seen:
+                removed_ids.add(email["Id"])
+            else:
+                seen.add(key)
+                unique_emails.append(email)
+        dupes = len(extractor.emails) - len(unique_emails)
+        if dupes:
+            log.info("Deduplication removed %d duplicate email(s)", dupes)
+            extractor.emails = unique_emails
+            # Drop recipients and attachments for removed emails
+            extractor.recipients = [
+                r for r in extractor.recipients
+                if r["EmailId"] not in removed_ids
+            ]
+            extractor.attachments = [
+                a for a in extractor.attachments
+                if a["EmailId"] not in removed_ids
+            ]
+        else:
+            log.info("Deduplication: no duplicates found")
 
     # ---- 1. emails.csv  →  EmailMessage (Insert) ------------------------
     # BodyHtml included/excluded BEFORE list() so columns and rename stay in sync
@@ -1291,7 +1332,7 @@ def main():
     print("="*65)
     print(f"  PST file   : {pst_path}")
     print(f"  Output dir : {out_dir.resolve()}")
-    print(f"  Emails     : {len(extractor.emails):,}")
+    print(f"  Emails     : {len(extractor.emails):,}" + (" (after deduplication)" if args.dedupe else ""))
     print(f"  Recipients : {len(extractor.recipients):,}")
     print(f"  Attachments: {len(extractor.attachments):,}")
     if args.save_attachments:
