@@ -19,7 +19,7 @@ Two-step workflow:
 
 Expected folder structure:
     output/
-      file_attachments/
+      attachment_files/
         <external_id>/
           attachment1.pdf
           attachment2.xlsx
@@ -46,7 +46,7 @@ from pathlib import Path
 DEFAULT_OUTPUT_DIR  = Path("output")
 DEFAULT_MAP_CSV     = Path("email_id_map.csv")
 DEFAULT_OUT_CSV     = Path("content_version_upload.csv")
-ATTACHMENTS_SUBDIR  = "file_attachments"   # fixed subfolder under output/
+ATTACHMENTS_SUBDIR  = "attachment_files"   # fixed subfolder under output/
 
 CV_FIELDS = [
     "Title",                   # filename without extension
